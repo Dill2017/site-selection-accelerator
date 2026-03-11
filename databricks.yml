@@ -1,0 +1,17 @@
+bundle:
+  name: site-selection-accelerator
+
+include:
+  - resources/*.yml
+
+variables:
+  warehouse_id:
+    lookup:
+      warehouse: "Starter Warehouse"
+
+targets:
+  dev:
+    default: true
+    mode: development
+  prod:
+    mode: production

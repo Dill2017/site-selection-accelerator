@@ -1,0 +1,21 @@
+# AI dev kit / Cursor tooling
+.ai-dev-kit/
+.cursor/
+.github/skills/
+.vscode/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+dist/
+build/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Databricks
+.databricks/
