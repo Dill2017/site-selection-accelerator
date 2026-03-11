@@ -173,6 +173,11 @@ Using the [SRAI](https://kraina-ai.github.io/srai/) library:
 4. Trains a **Hex2VecEmbedder** (encoder sizes `[15, 10]`, 5 epochs, CPU)
    on the H3 neighbourhood graph to produce dense embeddings per cell.
 
+> **Deep dive:** See [HEX2VEC_EXPLAINER.md](HEX2VEC_EXPLAINER.md) for a
+> full explanation of how Hex2Vec works — the training objective, neural
+> architecture, how POI features become embeddings, and how those embeddings
+> drive the similarity scores.
+
 ### Step 4 — Cosine Similarity (`similarity.py`)
 
 1. Maps each brand location to its H3 cell at the chosen resolution.
