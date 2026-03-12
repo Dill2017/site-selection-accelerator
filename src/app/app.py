@@ -7,6 +7,9 @@ embeddings, and cosine-similarity scoring.
 
 from __future__ import annotations
 
+import h3
+import numpy as np
+import pandas as pd
 import streamlit as st
 from geopy.geocoders import Nominatim
 
@@ -18,6 +21,7 @@ from pipeline import (
     get_cities,
     get_countries,
     get_nearest_address_per_cell,
+    get_pois_around_points,
     get_pois_with_h3,
     tessellate_city,
 )
@@ -34,7 +38,10 @@ st.set_page_config(
 st.title("Brand Site Matching")
 st.markdown(
     "Find **whitespace expansion opportunities** by comparing your brand's "
-    "location profile against the geospatial makeup of target cities."
+    "location profile against the geospatial makeup of target cities. "
+    "Brand locations can be in **any city** — the tool learns what "
+    "neighbourhoods your brand thrives in and finds similar areas in the "
+    "target market."
 )
 
 # ── Sidebar inputs ──────────────────────────────────────────────────────────
@@ -157,12 +164,48 @@ if run_button:
     # -- Pipeline execution --------------------------------------------------
     progress = st.progress(0, text="Tessellating city with H3…")
 
-    h3_cells_df = tessellate_city(country, city, resolution)
-    n_cells = len(h3_cells_df)
+    city_h3_cells_df = tessellate_city(country, city, resolution)
+    n_cells = len(city_h3_cells_df)
     progress.progress(15, text=f"City tessellated into {n_cells:,} H3 cells.")
 
-    progress.progress(20, text="Extracting POIs from Overture Maps…")
-    pois_df = get_pois_with_h3(country, city, resolution, selected_cats)
+    # -- Detect brand locations outside the target city -----------------------
+    city_cell_set = set(city_h3_cells_df["h3_cell"].tolist())
+    brand_outside: list[dict] = []
+    for loc in brand_locations:
+        hex_str = h3.latlng_to_cell(loc["lat"], loc["lon"], resolution)
+        if h3.str_to_int(hex_str) not in city_cell_set:
+            brand_outside.append(loc)
+
+    # -- Expand analysis to include brand-location neighbourhoods -------------
+    if brand_outside:
+        n_out = len(brand_outside)
+        progress.progress(
+            18,
+            text=f"{n_out} brand location(s) outside target city — "
+            f"fetching neighbourhood context…",
+        )
+        brand_ctx_cells, brand_ctx_pois = get_pois_around_points(
+            brand_outside, resolution, selected_cats, k_ring=2
+        )
+        new_cells = brand_ctx_cells[
+            ~brand_ctx_cells["h3_cell"].isin(city_cell_set)
+        ]
+        h3_cells_df = pd.concat(
+            [city_h3_cells_df, new_cells], ignore_index=True
+        )
+    else:
+        h3_cells_df = city_h3_cells_df
+
+    progress.progress(20, text="Querying POIs…")
+    city_pois_df = get_pois_with_h3(country, city, resolution, selected_cats)
+
+    if brand_outside and not brand_ctx_pois.empty:
+        pois_df = pd.concat(
+            [city_pois_df, brand_ctx_pois], ignore_index=True
+        ).drop_duplicates(subset=["poi_id"])
+    else:
+        pois_df = city_pois_df
+
     n_pois = len(pois_df)
     progress.progress(40, text=f"Found {n_pois:,} POIs in {len(selected_cats)} categories.")
 
@@ -178,12 +221,24 @@ if run_button:
 
     progress.progress(80, text="Computing similarity scores…")
     scored = compute_similarity(embeddings, brand_locations, resolution)
+
+    # -- Keep only target-city cells as expansion opportunities ---------------
+    scored = scored[scored["h3_cell"].isin(city_cell_set)].reset_index(drop=True)
+
+    # Re-normalise similarity to [0, 1] within the target city for
+    # better colour contrast on the map.
+    s_min, s_max = scored["similarity"].min(), scored["similarity"].max()
+    if s_max - s_min > 0:
+        scored["similarity"] = (scored["similarity"] - s_min) / (s_max - s_min)
+    else:
+        scored["similarity"] = np.zeros(len(scored))
+
     top_opps = get_top_opportunities(scored, top_n=20)
 
     address_lookup = get_nearest_address_per_cell(pois_df)
 
     progress.progress(95, text="Building map…")
-    deck = build_map(scored, brand_locations, h3_cells_df, address_lookup)
+    deck = build_map(scored, brand_locations, city_h3_cells_df, address_lookup)
 
     progress.progress(100, text="Done!")
 

@@ -5,9 +5,13 @@ include:
   - resources/*.yml
 
 variables:
+  catalog:
+    default: "dilshad_shawki"
+  schema:
+    default: "geospatial"
   warehouse_id:
     lookup:
-      warehouse: "Starter Warehouse"
+      warehouse: "Shared Endpoint"
 
 targets:
   dev:

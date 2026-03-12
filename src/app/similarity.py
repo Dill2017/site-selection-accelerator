@@ -52,7 +52,9 @@ def compute_similarity(
     if not brand_cells_in_emb:
         raise ValueError(
             "None of the brand locations fall within the analysed H3 cells. "
-            "Check that your locations are inside the selected city."
+            "This can happen when the brand-neighbourhood POI data is too "
+            "sparse for the selected categories. Try selecting more POI "
+            "categories or a coarser H3 resolution."
         )
 
     brand_profile = embeddings.loc[brand_cells_in_emb].mean(axis=0).values.reshape(1, -1)

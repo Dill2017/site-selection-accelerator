@@ -1,15 +1,18 @@
 """DBSQL geospatial query pipeline.
 
-All heavy spatial work — city polygon retrieval, H3 tessellation,
-POI extraction with H3 cell assignment, and count-vector aggregation —
-runs server-side on Databricks SQL using H3 and ST_* functions.
+Reads from pre-processed gold tables (gold_cities, gold_places) that
+contain flattened coordinates, pre-joined polygons, and denested
+categories.  All heavy geospatial pre-processing runs once in the
+SDP pipeline; the app only does lightweight H3 tessellation and
+POI-to-cell assignment at query time.
 """
 
 from __future__ import annotations
 
+import h3 as _h3
 import pandas as pd
 
-from config import DIVISION_AREA_TABLE, DIVISION_TABLE, PLACES_TABLE
+from config import GOLD_CITIES_TABLE, GOLD_PLACES_TABLE
 from db import execute_query
 
 
@@ -17,13 +20,10 @@ from db import execute_query
 
 
 def get_countries() -> list[str]:
-    """Return ISO-2 country codes that have at least one city in the divisions catalog."""
+    """Return country codes that have at least one city in the gold table."""
     query = f"""
         SELECT DISTINCT country
-        FROM {DIVISION_TABLE}
-        WHERE subtype = 'locality'
-          AND class IN ('city', 'town')
-          AND country IS NOT NULL
+        FROM {GOLD_CITIES_TABLE}
         ORDER BY country
     """
     return execute_query(query)["country"].tolist()
@@ -32,136 +32,49 @@ def get_countries() -> list[str]:
 def get_cities(country: str) -> list[str]:
     """Return city/town names for a given country code."""
     query = f"""
-        SELECT DISTINCT names.primary AS city_name
-        FROM {DIVISION_TABLE}
-        WHERE subtype = 'locality'
-          AND class IN ('city', 'town')
-          AND country = '{country}'
-          AND names.primary IS NOT NULL
+        SELECT DISTINCT city_name
+        FROM {GOLD_CITIES_TABLE}
+        WHERE country = '{country}'
         ORDER BY city_name
     """
     return execute_query(query)["city_name"].tolist()
-
-
-# ── City polygon helpers ────────────────────────────────────────────────────
-
-# Offset in degrees used to build a fallback bbox when no polygon exists.
-# ~0.15 deg latitude ≈ 17 km; good default for city-scale analysis.
-_BBOX_OFFSET_DEG = 0.15
-
-
-def _get_city_center(country: str, city: str) -> tuple[float, float]:
-    """Return (lon, lat) of the city point from the division catalog."""
-    query = f"""
-        SELECT
-            bbox.xmin AS lon,
-            bbox.ymin AS lat
-        FROM {DIVISION_TABLE}
-        WHERE subtype = 'locality'
-          AND class IN ('city', 'town')
-          AND country = '{country}'
-          AND names.primary = '{city}'
-        LIMIT 1
-    """
-    df = execute_query(query)
-    if df.empty:
-        raise ValueError(f"City not found: {city}, {country}")
-    row = df.iloc[0]
-    return float(row["lon"]), float(row["lat"])
-
-
-def _city_has_polygon(country: str, city: str) -> bool:
-    """Check whether division_area contains a polygon for this city."""
-    query = f"""
-        SELECT COUNT(*) AS cnt
-        FROM {DIVISION_AREA_TABLE} da
-        JOIN {DIVISION_TABLE} d ON da.division_id = d.id
-        WHERE d.subtype = 'locality'
-          AND d.class IN ('city', 'town')
-          AND d.country = '{country}'
-          AND d.names.primary = '{city}'
-    """
-    return int(execute_query(query).iloc[0]["cnt"]) > 0
-
-
-def _polygon_wkt_cte(country: str, city: str) -> str:
-    """Return a SQL CTE that produces a single geom_wkt column.
-
-    Uses the real polygon from division_area if available, otherwise
-    builds a rectangular polygon from the city centre point.
-    """
-    if _city_has_polygon(country, city):
-        return f"""
-            city_poly AS (
-                SELECT ST_AsText(ST_GeomFromWKB(da.geom)) AS geom_wkt
-                FROM {DIVISION_AREA_TABLE} da
-                JOIN {DIVISION_TABLE} d ON da.division_id = d.id
-                WHERE d.subtype = 'locality'
-                  AND d.class IN ('city', 'town')
-                  AND d.country = '{country}'
-                  AND d.names.primary = '{city}'
-                LIMIT 1
-            )"""
-
-    lon, lat = _get_city_center(country, city)
-    off = _BBOX_OFFSET_DEG
-    wkt = (
-        f"POLYGON(("
-        f"{lon - off} {lat - off}, "
-        f"{lon + off} {lat - off}, "
-        f"{lon + off} {lat + off}, "
-        f"{lon - off} {lat + off}, "
-        f"{lon - off} {lat - off}"
-        f"))"
-    )
-    return f"city_poly AS (SELECT '{wkt}' AS geom_wkt)"
 
 
 # ── Core pipeline queries ───────────────────────────────────────────────────
 
 
 def get_city_bbox(country: str, city: str) -> dict:
-    """Return the bounding-box used to pre-filter the places table.
+    """Return the bounding box for a city from the gold table.
 
     Returns dict with keys xmin, xmax, ymin, ymax.
     """
-    if _city_has_polygon(country, city):
-        query = f"""
-            SELECT
-                ST_XMin(ST_GeomFromWKB(da.geom)) AS xmin,
-                ST_XMax(ST_GeomFromWKB(da.geom)) AS xmax,
-                ST_YMin(ST_GeomFromWKB(da.geom)) AS ymin,
-                ST_YMax(ST_GeomFromWKB(da.geom)) AS ymax
-            FROM {DIVISION_AREA_TABLE} da
-            JOIN {DIVISION_TABLE} d ON da.division_id = d.id
-            WHERE d.subtype = 'locality'
-              AND d.class IN ('city', 'town')
-              AND d.country = '{country}'
-              AND d.names.primary = '{city}'
-            LIMIT 1
-        """
-        df = execute_query(query)
-        return df.iloc[0].to_dict()
-
-    lon, lat = _get_city_center(country, city)
-    off = _BBOX_OFFSET_DEG
-    return {
-        "xmin": lon - off,
-        "xmax": lon + off,
-        "ymin": lat - off,
-        "ymax": lat + off,
-    }
+    query = f"""
+        SELECT bbox_xmin AS xmin, bbox_xmax AS xmax,
+               bbox_ymin AS ymin, bbox_ymax AS ymax
+        FROM {GOLD_CITIES_TABLE}
+        WHERE country = '{country}' AND city_name = '{city}'
+        LIMIT 1
+    """
+    df = execute_query(query)
+    if df.empty:
+        raise ValueError(f"City not found: {city}, {country}")
+    return df.iloc[0].to_dict()
 
 
 def tessellate_city(country: str, city: str, resolution: int) -> pd.DataFrame:
     """H3-tessellate a city polygon and return cell IDs with centre coordinates.
 
+    The polygon (real or fallback bbox) is pre-computed in gold_cities.
+
     Returns DataFrame with columns: h3_cell, center_lat, center_lon
     """
-    poly_cte = _polygon_wkt_cte(country, city)
-
     query = f"""
-        WITH {poly_cte},
+        WITH city_poly AS (
+            SELECT geom_wkt
+            FROM {GOLD_CITIES_TABLE}
+            WHERE country = '{country}' AND city_name = '{city}'
+            LIMIT 1
+        ),
         cells AS (
             SELECT explode(h3_polyfillash3(geom_wkt, {resolution})) AS h3_cell
             FROM city_poly
@@ -183,6 +96,9 @@ def get_pois_with_h3(
 ) -> pd.DataFrame:
     """Extract POIs inside the city bbox, assign each to an H3 cell.
 
+    Reads from the pre-processed gold_places table — no WKB
+    conversion or array access at query time.
+
     Returns DataFrame with columns:
         poi_id, category, lon, lat, address, h3_cell
     """
@@ -191,22 +107,18 @@ def get_pois_with_h3(
 
     query = f"""
         SELECT
-            p.id                                     AS poi_id,
-            p.categories.primary                     AS category,
-            ST_X(ST_GeomFromWKB(p.geom))             AS lon,
-            ST_Y(ST_GeomFromWKB(p.geom))             AS lat,
-            p.addresses[0].freeform                  AS address,
-            h3_longlatash3(
-                ST_X(ST_GeomFromWKB(p.geom)),
-                ST_Y(ST_GeomFromWKB(p.geom)),
-                {resolution}
-            ) AS h3_cell
-        FROM {PLACES_TABLE} p
-        WHERE p.categories.primary IN ({cat_list})
-          AND p.bbox.xmin >= {bbox['xmin']}
-          AND p.bbox.xmax <= {bbox['xmax']}
-          AND p.bbox.ymin >= {bbox['ymin']}
-          AND p.bbox.ymax <= {bbox['ymax']}
+            poi_id,
+            category,
+            lon,
+            lat,
+            address,
+            h3_longlatash3(lon, lat, {resolution}) AS h3_cell
+        FROM {GOLD_PLACES_TABLE}
+        WHERE category IN ({cat_list})
+          AND bbox_xmin >= {bbox['xmin']}
+          AND bbox_xmax <= {bbox['xmax']}
+          AND bbox_ymin >= {bbox['ymin']}
+          AND bbox_ymax <= {bbox['ymax']}
     """
     return execute_query(query)
 
@@ -240,3 +152,94 @@ def get_nearest_address_per_cell(pois_df: pd.DataFrame) -> dict[int, str]:
         .set_index("h3_cell")["address"]
     )
     return addr.to_dict()
+
+
+# ── Cross-city helpers (brand locations outside the target city) ─────────────
+
+
+def tessellate_points(
+    locations: list[dict],
+    resolution: int,
+    k_ring: int = 2,
+) -> pd.DataFrame:
+    """H3-tessellate neighborhoods around arbitrary lat/lon points.
+
+    For each location creates a disk of H3 cells (center + k-ring neighbors)
+    so the embedding model has enough spatial context.
+
+    Returns DataFrame with columns: h3_cell, center_lat, center_lon
+    """
+    all_cells: set[str] = set()
+    for loc in locations:
+        center_hex = _h3.latlng_to_cell(loc["lat"], loc["lon"], resolution)
+        all_cells.update(_h3.grid_disk(center_hex, k_ring))
+
+    rows = []
+    for hex_str in all_cells:
+        lat, lng = _h3.cell_to_latlng(hex_str)
+        rows.append({
+            "h3_cell": _h3.str_to_int(hex_str),
+            "center_lat": lat,
+            "center_lon": lng,
+        })
+    return pd.DataFrame(rows)
+
+
+def get_pois_around_points(
+    locations: list[dict],
+    resolution: int,
+    categories: list[str],
+    k_ring: int = 2,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Fetch H3 cells and POIs around a list of lat/lon points.
+
+    Builds a tight bounding box per unique brand-cell neighborhood and
+    issues a single SQL query with OR-ed bbox filters for efficiency.
+
+    Returns
+    -------
+    h3_cells_df : DataFrame (h3_cell, center_lat, center_lon)
+    pois_df : DataFrame (poi_id, category, lon, lat, address, h3_cell)
+    """
+    h3_cells_df = tessellate_points(locations, resolution, k_ring)
+    if h3_cells_df.empty:
+        empty_pois = pd.DataFrame(
+            columns=["poi_id", "category", "lon", "lat", "address", "h3_cell"]
+        )
+        return h3_cells_df, empty_pois
+
+    cell_set = set(h3_cells_df["h3_cell"].tolist())
+    cat_list = ", ".join(f"'{c}'" for c in categories)
+
+    seen_centers: set[str] = set()
+    bbox_clauses: list[str] = []
+    for loc in locations:
+        center_hex = _h3.latlng_to_cell(loc["lat"], loc["lon"], resolution)
+        if center_hex in seen_centers:
+            continue
+        seen_centers.add(center_hex)
+
+        disk = _h3.grid_disk(center_hex, k_ring)
+        lats, lons = zip(*[_h3.cell_to_latlng(h) for h in disk])
+        pad = 0.005
+        bbox_clauses.append(
+            f"(bbox_xmin >= {min(lons) - pad} AND bbox_xmax <= {max(lons) + pad} "
+            f"AND bbox_ymin >= {min(lats) - pad} AND bbox_ymax <= {max(lats) + pad})"
+        )
+
+    bbox_filter = " OR ".join(bbox_clauses)
+    query = f"""
+        SELECT
+            poi_id,
+            category,
+            lon,
+            lat,
+            address,
+            h3_longlatash3(lon, lat, {resolution}) AS h3_cell
+        FROM {GOLD_PLACES_TABLE}
+        WHERE category IN ({cat_list})
+          AND ({bbox_filter})
+    """
+    pois_df = execute_query(query)
+    pois_df = pois_df[pois_df["h3_cell"].isin(cell_set)]
+    return h3_cells_df, pois_df

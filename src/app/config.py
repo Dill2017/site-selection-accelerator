@@ -1,8 +1,12 @@
 """Configuration for the Site Selection Accelerator."""
 
-PLACES_TABLE = "carto_overture_maps_places.carto.place"
-DIVISION_TABLE = "carto_overture_maps_divisions.carto.division"
-DIVISION_AREA_TABLE = "carto_overture_maps_divisions.carto.division_area"
+import os
+
+_CATALOG = os.getenv("GOLD_CATALOG", "dilshad_shawki")
+_SCHEMA = os.getenv("GOLD_SCHEMA", "geospatial")
+
+GOLD_CITIES_TABLE = f"{_CATALOG}.{_SCHEMA}.gold_cities"
+GOLD_PLACES_TABLE = f"{_CATALOG}.{_SCHEMA}.gold_places"
 
 CATEGORY_GROUPS: dict[str, list[str]] = {
     "Food & Drink": [

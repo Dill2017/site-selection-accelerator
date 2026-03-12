@@ -8,3 +8,7 @@ command:
 env:
   - name: DATABRICKS_WAREHOUSE_ID
     valueFrom: sql-warehouse
+  - name: GOLD_CATALOG
+    value: "dilshad_shawki"
+  - name: GOLD_SCHEMA
+    value: "geospatial"

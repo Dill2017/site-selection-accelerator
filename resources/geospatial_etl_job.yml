@@ -1,0 +1,24 @@
+resources:
+  jobs:
+    geospatial_etl_job:
+      name: "[${bundle.target}] Site Selection - Refresh Geospatial Data"
+      tasks:
+        - task_key: "setup_schema"
+          sql_task:
+            warehouse_id: ${var.warehouse_id}
+            file:
+              path: ../src/pipeline/transformations/setup_schema.sql
+        - task_key: "create_gold_cities"
+          depends_on:
+            - task_key: "setup_schema"
+          sql_task:
+            warehouse_id: ${var.warehouse_id}
+            file:
+              path: ../src/pipeline/transformations/gold_cities.sql
+        - task_key: "create_gold_places"
+          depends_on:
+            - task_key: "setup_schema"
+          sql_task:
+            warehouse_id: ${var.warehouse_id}
+            file:
+              path: ../src/pipeline/transformations/gold_places.sql
