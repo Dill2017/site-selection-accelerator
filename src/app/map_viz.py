@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+from typing import Optional
+
 import h3
 import numpy as np
 import pandas as pd
 import pydeck as pdk
+
+from explainability import tooltip_snippet
 
 
 CARTO_BASEMAP = "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json"
@@ -35,6 +39,8 @@ def build_map(
     h3_cells_df: pd.DataFrame,
     address_lookup: dict[int, str],
     top_n: int = 20,
+    count_vectors: Optional[pd.DataFrame] = None,
+    brand_avg: Optional[pd.Series] = None,
 ) -> pdk.Deck:
     """Build a pydeck Deck with three layers.
 
@@ -44,8 +50,10 @@ def build_map(
         h3_cell, similarity, is_brand_cell.
     brand_locations : list of dicts with lat, lon.
     h3_cells_df : DataFrame with h3_cell, center_lat, center_lon.
-    address_lookup : dict mapping h3_cell → nearest address string.
+    address_lookup : dict mapping h3_cell -> nearest address string.
     top_n : number of top opportunities to highlight.
+    count_vectors : optional POI count matrix for tooltip explainability.
+    brand_avg : optional brand average counts for tooltip comparison.
     """
     # ── 1. H3 heatmap layer (exclude brand cells) ──────────────────────────
     whitespace = scored_df[~scored_df["is_brand_cell"]].copy()
@@ -53,6 +61,13 @@ def build_map(
     whitespace["color"] = whitespace["similarity"].apply(_similarity_to_rgba)
     whitespace["address"] = whitespace["h3_cell"].map(address_lookup).fillna("—")
     whitespace["sim_pct"] = (whitespace["similarity"] * 100).round(1)
+
+    if count_vectors is not None and brand_avg is not None:
+        whitespace["cat_detail"] = whitespace["h3_cell"].apply(
+            lambda cid: tooltip_snippet(cid, count_vectors, brand_avg)
+        )
+    else:
+        whitespace["cat_detail"] = ""
 
     h3_layer = pdk.Layer(
         "H3HexagonLayer",
@@ -113,7 +128,10 @@ def build_map(
         "html": (
             "<b>Similarity:</b> {sim_pct}%<br/>"
             "<b>Address:</b> {address}<br/>"
-            "<b>H3 Cell:</b> {hex_id}"
+            "<b>H3 Cell:</b> {hex_id}<br/>"
+            "<hr style='margin:4px 0;border-color:#555'/>"
+            "<b>Top Categories</b> (cell / brand avg):<br/>"
+            "{cat_detail}"
         ),
         "style": {
             "backgroundColor": "#1a1a2e",

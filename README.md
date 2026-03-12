@@ -54,12 +54,21 @@ enabling cross-city expansion analysis.
 │  └──────────────────────────┬───────────────────────────────────┘    │
 │                             ▼                                        │
 │  ┌──────────────────────────────────────────────────────────────┐    │
+│  │        Score Explainability (explainability.py)             │    │
+│  │                                                              │    │
+│  │  • Brand profile from POI count vectors (avg + per-cell)     │    │
+│  │  • Per-opportunity category comparison vs brand average       │    │
+│  │  • Text summaries and tooltip snippets                        │    │
+│  └──────────────────────────┬───────────────────────────────────┘    │
+│                             ▼                                        │
+│  ┌──────────────────────────────────────────────────────────────┐    │
 │  │             pydeck Map Visualisation (map_viz.py)            │    │
 │  │                                                              │    │
 │  │  • CARTO basemap                                             │    │
 │  │  • H3HexagonLayer — similarity heatmap                       │    │
 │  │  • ScatterplotLayer — existing locations (blue)              │    │
 │  │  • ScatterplotLayer — top opportunities (green)              │    │
+│  │  • Enhanced tooltips with category breakdowns                 │    │
 │  └──────────────────────────────────────────────────────────────┘    │
 └───────────────────────────────────────────────────────────────────────┘
                               │
@@ -250,7 +259,24 @@ basemap:
 | **ScatterplotLayer (green)** | Top 20 recommended opportunity locations (cell centres) |
 
 Hovering over any H3 cell shows a tooltip with the similarity percentage,
-nearest address, and cell ID.
+nearest address, cell ID, and a **category breakdown** comparing the cell's
+top POI counts against the brand average.
+
+### Step 7 — Score Explainability (`explainability.py`)
+
+Rather than showing only a similarity percentage, the app provides interpretable
+explanations using the raw POI count vectors:
+
+- **Brand Location Profile** — displayed before the map as a horizontal bar
+  chart of average POI counts per category across all brand cells, colour-coded
+  by category group (Food & Drink, Shopping, etc.). An expandable heatmap shows
+  the per-location breakdown so users can see variance across their stores.
+- **Enhanced tooltips** — hovering any hexagon on the map shows the top 4
+  categories in that cell compared to the brand average (e.g. "Restaurant: 4 / 3.2").
+- **Row-select detail panel** — clicking any row in the Top 20 table reveals a
+  side-by-side grouped bar chart comparing that opportunity's category counts
+  (green) against the brand average (blue), along with a text summary of which
+  category groups are above or below average.
 
 ---
 
@@ -274,6 +300,7 @@ site_selection_accelerator/
     │   ├── pipeline.py               # DBSQL queries on gold tables + cross-city logic
     │   ├── embeddings.py             # SRAI Hex2Vec embedding pipeline
     │   ├── similarity.py             # Cosine similarity scoring
+    │   ├── explainability.py         # Score explainability (brand profile, category comparisons)
     │   └── map_viz.py                # pydeck map construction
     └── pipeline/
         └── transformations/
@@ -302,6 +329,7 @@ site_selection_accelerator/
 | `h3` | Client-side H3 cell ↔ polygon conversions, k-ring neighbourhoods |
 | `geopandas` / `shapely` | GeoDataFrame construction for SRAI |
 | `scikit-learn` | `cosine_similarity` for scoring |
+| `altair` | Vega-Lite charts for brand profile and explainability panels |
 | `pydeck` | Deck.gl map rendering in Streamlit |
 | `geopy` | Optional address geocoding via Nominatim |
 | `databricks-sql-connector` | DBSQL query execution |

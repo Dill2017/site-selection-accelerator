@@ -7,6 +7,7 @@ embeddings, and cosine-similarity scoring.
 
 from __future__ import annotations
 
+import altair as alt
 import h3
 import numpy as np
 import pandas as pd
@@ -15,6 +16,7 @@ from geopy.geocoders import Nominatim
 
 from config import CATEGORY_GROUPS, DEFAULT_H3_RESOLUTION, H3_RESOLUTIONS
 from embeddings import run_embedding_pipeline
+from explainability import build_brand_profile, explain_opportunity, summarise_explanation
 from map_viz import build_map
 from pipeline import (
     build_count_vectors,
@@ -220,13 +222,17 @@ if run_button:
     embeddings = run_embedding_pipeline(h3_cells_df, pois_df, selected_cats)
 
     progress.progress(80, text="Computing similarity scores…")
-    scored = compute_similarity(embeddings, brand_locations, resolution)
+    scored, brand_cells_in_emb = compute_similarity(
+        embeddings, brand_locations, resolution
+    )
+
+    # -- Build explainability data -------------------------------------------
+    brand_profile = build_brand_profile(count_vectors, brand_cells_in_emb)
+    brand_avg = brand_profile["avg"]
 
     # -- Keep only target-city cells as expansion opportunities ---------------
     scored = scored[scored["h3_cell"].isin(city_cell_set)].reset_index(drop=True)
 
-    # Re-normalise similarity to [0, 1] within the target city for
-    # better colour contrast on the map.
     s_min, s_max = scored["similarity"].min(), scored["similarity"].max()
     if s_max - s_min > 0:
         scored["similarity"] = (scored["similarity"] - s_min) / (s_max - s_min)
@@ -238,11 +244,99 @@ if run_button:
     address_lookup = get_nearest_address_per_cell(pois_df)
 
     progress.progress(95, text="Building map…")
-    deck = build_map(scored, brand_locations, city_h3_cells_df, address_lookup)
+    deck = build_map(
+        scored,
+        brand_locations,
+        city_h3_cells_df,
+        address_lookup,
+        count_vectors=count_vectors,
+        brand_avg=brand_avg,
+    )
 
     progress.progress(100, text="Done!")
 
     # -- Display results -----------------------------------------------------
+
+    # ── Brand Location Profile ──────────────────────────────────────────────
+    st.subheader("Brand Location Profile")
+    st.caption(
+        "Average POI category counts across your brand's existing locations. "
+        "This is the baseline the similarity scores are compared against."
+    )
+
+    avg_nonzero = brand_avg[brand_avg > 0].sort_values(ascending=False)
+    if not avg_nonzero.empty:
+        avg_df = avg_nonzero.reset_index()
+        avg_df.columns = ["Category", "Avg Count"]
+        avg_df["Category"] = avg_df["Category"].str.replace("_", " ").str.title()
+
+        group_lookup = {}
+        for grp, cats in CATEGORY_GROUPS.items():
+            for c in cats:
+                group_lookup[c.replace("_", " ").title()] = grp
+        avg_df["Group"] = avg_df["Category"].map(group_lookup).fillna("Other")
+
+        avg_chart = (
+            alt.Chart(avg_df)
+            .mark_bar()
+            .encode(
+                x=alt.X("Avg Count:Q", title="Average POI Count"),
+                y=alt.Y("Category:N", sort="-x", title=None),
+                color=alt.Color(
+                    "Group:N",
+                    title="Category Group",
+                    legend=alt.Legend(orient="bottom"),
+                ),
+                tooltip=["Category", "Avg Count", "Group"],
+            )
+            .properties(height=max(len(avg_df) * 22, 200))
+        )
+        st.altair_chart(avg_chart, use_container_width=True)
+    else:
+        st.info("No POI data found for the brand location cells.")
+
+    with st.expander("Individual Brand Location Breakdown"):
+        brand_cells_df = brand_profile["cells"]
+        if not brand_cells_df.empty:
+            brand_cells_display = brand_cells_df.copy()
+            brand_cells_display.index = brand_cells_display.index.map(
+                lambda c: address_lookup.get(c, h3.int_to_str(c))
+            )
+            non_zero_cols = brand_cells_display.columns[
+                brand_cells_display.sum(axis=0) > 0
+            ]
+            heatmap_data = brand_cells_display[non_zero_cols]
+            heatmap_data.columns = [
+                c.replace("_", " ").title() for c in heatmap_data.columns
+            ]
+
+            melted = heatmap_data.reset_index().melt(
+                id_vars="index", var_name="Category", value_name="Count"
+            )
+            melted.columns = ["Location", "Category", "Count"]
+
+            heatmap = (
+                alt.Chart(melted)
+                .mark_rect()
+                .encode(
+                    x=alt.X("Category:N", title=None, axis=alt.Axis(labelAngle=-45)),
+                    y=alt.Y("Location:N", title=None),
+                    color=alt.Color(
+                        "Count:Q",
+                        scale=alt.Scale(scheme="blues"),
+                        title="POI Count",
+                    ),
+                    tooltip=["Location", "Category", "Count"],
+                )
+                .properties(
+                    height=max(len(heatmap_data) * 30, 100),
+                )
+            )
+            st.altair_chart(heatmap, use_container_width=True)
+        else:
+            st.info("No count data available for brand cells.")
+
+    # ── Whitespace Opportunity Map ──────────────────────────────────────────
     st.subheader("Whitespace Opportunity Map")
 
     col_legend, _ = st.columns([1, 2])
@@ -252,20 +346,81 @@ if run_button:
             "🟢 **Top opportunities** &nbsp;|&nbsp; "
             "🟥→🟦 **Similarity heatmap** (red = high, blue = low)"
         )
+    st.caption("Hover over a hexagon to see its similarity score and top POI category comparison.")
 
     st.pydeck_chart(deck)
 
+    # ── Top 20 Whitespace Opportunities ─────────────────────────────────────
     st.subheader("Top 20 Whitespace Opportunities")
+    st.caption("Select a row to see a detailed category breakdown below the table.")
+
     display = top_opps.copy()
     display["address"] = display["h3_cell"].map(address_lookup).fillna("—")
-    display["similarity"] = (display["similarity"] * 100).round(1).astype(str) + "%"
+    display["similarity_pct"] = (display["similarity"] * 100).round(1).astype(str) + "%"
 
     centres = display["h3_cell"].apply(_h3_center_for_table)
-    display["latitude"] = centres.apply(lambda x: x[0])
-    display["longitude"] = centres.apply(lambda x: x[1])
+    display["latitude"] = centres.apply(lambda x: round(x[0], 5))
+    display["longitude"] = centres.apply(lambda x: round(x[1], 5))
 
-    st.dataframe(
-        display[["address", "similarity", "latitude", "longitude"]],
+    selection = st.dataframe(
+        display[["address", "similarity_pct", "latitude", "longitude"]].rename(
+            columns={"similarity_pct": "similarity"}
+        ),
         use_container_width=True,
         hide_index=True,
+        on_select="rerun",
+        selection_mode="single-row",
     )
+
+    # ── Detail panel for selected opportunity ───────────────────────────────
+    selected_rows = selection.selection.rows if selection.selection else []
+    if selected_rows:
+        sel_idx = selected_rows[0]
+        sel_row = display.iloc[sel_idx]
+        sel_cell = sel_row["h3_cell"]
+        sel_addr = sel_row["address"]
+        sel_sim = sel_row["similarity_pct"]
+
+        exp = explain_opportunity(sel_cell, count_vectors, brand_avg)
+
+        st.markdown(f"### {sel_addr}")
+        st.markdown(f"**Similarity:** {sel_sim} &nbsp;|&nbsp; **{summarise_explanation(exp)}**")
+
+        cell_counts = exp["counts"]
+        comparison_cats = cell_counts.index[
+            (cell_counts > 0) | (brand_avg.reindex(cell_counts.index, fill_value=0) > 0)
+        ]
+        if len(comparison_cats) > 0:
+            comp_df = pd.DataFrame({
+                "Category": [c.replace("_", " ").title() for c in comparison_cats],
+                "This Location": [int(cell_counts[c]) for c in comparison_cats],
+                "Brand Average": [round(brand_avg.get(c, 0), 1) for c in comparison_cats],
+            })
+
+            comp_melted = comp_df.melt(
+                id_vars="Category", var_name="Source", value_name="Count"
+            )
+
+            comparison_chart = (
+                alt.Chart(comp_melted)
+                .mark_bar(opacity=0.85)
+                .encode(
+                    x=alt.X("Count:Q", title="POI Count"),
+                    y=alt.Y("Category:N", sort="-x", title=None),
+                    color=alt.Color(
+                        "Source:N",
+                        scale=alt.Scale(
+                            domain=["This Location", "Brand Average"],
+                            range=["#2ecc71", "#3498db"],
+                        ),
+                        title=None,
+                        legend=alt.Legend(orient="top"),
+                    ),
+                    xOffset="Source:N",
+                    tooltip=["Category", "Source", "Count"],
+                )
+                .properties(height=max(len(comp_df) * 28, 150))
+            )
+            st.altair_chart(comparison_chart, use_container_width=True)
+        else:
+            st.info("No POI categories present in this cell or the brand profile.")
