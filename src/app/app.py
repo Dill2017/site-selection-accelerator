@@ -310,10 +310,10 @@ if run_button:
                 c.replace("_", " ").title() for c in heatmap_data.columns
             ]
 
+            heatmap_data.index.name = "Location"
             melted = heatmap_data.reset_index().melt(
-                id_vars="index", var_name="Category", value_name="Count"
+                id_vars="Location", var_name="Category", value_name="Count"
             )
-            melted.columns = ["Location", "Category", "Count"]
 
             heatmap = (
                 alt.Chart(melted)
