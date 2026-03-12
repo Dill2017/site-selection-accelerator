@@ -1,6 +1,11 @@
 resources:
   apps:
     site_selection_app:
-      name: "site-selection-${bundle.target}"
+      name: "site-selection-accelerator"
       description: "Brand Site Selection Accelerator — find whitespace opportunities using geospatial embeddings"
       source_code_path: ../src/app
+      resources:
+        - name: "sql-warehouse"
+          sql_warehouse:
+            id: ${var.warehouse_id}
+            permission: "CAN_USE"
