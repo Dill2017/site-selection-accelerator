@@ -39,7 +39,15 @@ resources:
               - "${var.catalog}"
               - "${var.schema}"
               - "${var.warehouse_id}"
+          libraries:
+            - pypi:
+                package: "databricks-sdk>=0.65.0"
           new_cluster:
-            spark_version: "15.4.x-scala2.12"
-            node_type_id: "i3.xlarge"
+            spark_version: "16.4.x-scala2.13"
+            node_type_id: "Standard_DS3_v2"
             num_workers: 0
+            spark_conf:
+              spark.databricks.cluster.profile: singleNode
+              spark.master: "local[*]"
+            custom_tags:
+              ResourceClass: SingleNode

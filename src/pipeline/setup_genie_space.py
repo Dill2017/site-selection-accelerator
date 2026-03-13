@@ -7,6 +7,9 @@ reused and its instructions are updated; otherwise a new one is created.
 The space_id is written to a small key-value table so the app can
 read it at startup without hard-coding IDs.
 
+Uses the REST API for space CRUD (create/update) since the SDK's
+GenieAPI only covers conversations, not space management.
+
 End users can also run this script directly:
     python setup_genie_space.py <catalog> <schema> <warehouse_id>
 Or with env vars (loads from .env):
@@ -158,15 +161,23 @@ def _build_serialized_space(catalog: str, schema: str) -> str:
     })
 
 
+def _api(w: WorkspaceClient, method: str, path: str, body: dict | None = None):
+    """Thin wrapper around the SDK's API client for REST calls."""
+    resp = w.api_client.do(method, path, body=body)
+    if isinstance(resp, bytes):
+        return json.loads(resp)
+    return resp
+
+
 def _find_existing_space(w: WorkspaceClient) -> str | None:
     """Return the space_id of an existing Genie Space matching our name."""
     try:
-        response = w.genie.list_spaces()
-        if response and response.spaces:
-            for space in response.spaces:
-                if space.title == GENIE_DISPLAY_NAME:
-                    log.info("Found existing Genie Space: %s", space.space_id)
-                    return space.space_id
+        resp = _api(w, "GET", "/api/2.0/genie/spaces")
+        for space in resp.get("spaces", []):
+            if space.get("title") == GENIE_DISPLAY_NAME:
+                sid = space.get("space_id") or space.get("id")
+                log.info("Found existing Genie Space: %s", sid)
+                return sid
     except Exception as e:
         log.warning("Could not list Genie Spaces: %s", e)
     return None
@@ -178,17 +189,18 @@ def _create_space(
     schema: str,
     warehouse_id: str,
 ) -> str:
-    """Create a new Genie Space and return its ID."""
+    """Create a new Genie Space via REST API and return its ID."""
     serialized = _build_serialized_space(catalog, schema)
 
-    space = w.genie.create_space(
-        warehouse_id=warehouse_id,
-        serialized_space=serialized,
-        title=GENIE_DISPLAY_NAME,
-        description=GENIE_DESCRIPTION,
-    )
-    log.info("Created Genie Space: %s", space.space_id)
-    return space.space_id
+    resp = _api(w, "POST", "/api/2.0/genie/spaces", {
+        "warehouse_id": warehouse_id,
+        "serialized_space": serialized,
+        "title": GENIE_DISPLAY_NAME,
+        "description": GENIE_DESCRIPTION,
+    })
+    space_id = resp.get("space_id") or resp.get("id")
+    log.info("Created Genie Space: %s", space_id)
+    return space_id
 
 
 def _update_space_instructions(
@@ -200,10 +212,9 @@ def _update_space_instructions(
     """Update an existing Genie Space with the latest instructions."""
     serialized = _build_serialized_space(catalog, schema)
     try:
-        w.genie.update_space(
-            space_id=space_id,
-            serialized_space=serialized,
-        )
+        _api(w, "PATCH", f"/api/2.0/genie/spaces/{space_id}", {
+            "serialized_space": serialized,
+        })
         log.info("Updated instructions for Genie Space: %s", space_id)
     except Exception as e:
         log.warning("Could not update space instructions: %s", e)
@@ -248,6 +259,28 @@ def _persist_space_id(
     log.info("Persisted GENIE_SPACE_ID=%s to %s", space_id, table)
 
 
+def _grant_app_sp_access(w: WorkspaceClient, space_id: str, app_name: str = "site-selection-accelerator") -> None:
+    """Grant the Databricks App's service principal CAN_RUN on the Genie Space."""
+    try:
+        app = w.apps.get(app_name)
+        sp_client_id = app.service_principal_client_id
+        if not sp_client_id:
+            log.warning("App %s has no service_principal_client_id", app_name)
+            return
+
+        _api(w, "PATCH", f"/api/2.0/permissions/genie/{space_id}", {
+            "access_control_list": [
+                {
+                    "service_principal_name": sp_client_id,
+                    "permission_level": "CAN_RUN",
+                }
+            ],
+        })
+        log.info("Granted CAN_RUN on Genie Space %s to SP %s", space_id, sp_client_id)
+    except Exception as e:
+        log.warning("Could not grant SP access to Genie Space: %s", e)
+
+
 def main(catalog: str, schema: str, warehouse_id: str) -> str:
     """Ensure the Genie Space exists, update instructions, and return its ID."""
     w = WorkspaceClient()
@@ -258,6 +291,7 @@ def main(catalog: str, schema: str, warehouse_id: str) -> str:
     else:
         space_id = _create_space(w, catalog, schema, warehouse_id)
 
+    _grant_app_sp_access(w, space_id)
     _persist_space_id(w, catalog, schema, space_id, warehouse_id)
     return space_id
 
@@ -279,7 +313,7 @@ if __name__ == "__main__":
             import os
             from dotenv import load_dotenv
             load_dotenv()
-            catalog = os.getenv("GOLD_CATALOG", "beatrice_liew")
+            catalog = os.getenv("GOLD_CATALOG", "dilshad_shawki")
             schema = os.getenv("GOLD_SCHEMA", "geospatial")
             warehouse_id = os.getenv("DATABRICKS_WAREHOUSE_ID", "")
 

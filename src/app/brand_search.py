@@ -57,24 +57,22 @@ def _get_workspace_client() -> WorkspaceClient:
     return _ws_client
 
 
-# ── Genie Space auto-provisioning ────────────────────────────────────────────
+# ── Genie Space resolution ───────────────────────────────────────────────────
 
 _GENIE_DISPLAY_NAME = "Site Selection - Brand & Competition Explorer"
 
 
 def _ensure_genie_space() -> str:
-    """Return the GENIE_SPACE_ID, creating the space if it doesn't exist.
+    """Return the GENIE_SPACE_ID, reading from config or searching by name.
 
     Resolution order:
     1. cfg.GENIE_SPACE_ID (env var or app_config table)
-    2. Find existing space by name
-    3. Create a new space
+    2. Find existing space by display name via SDK
     """
     if cfg.GENIE_SPACE_ID:
         return cfg.GENIE_SPACE_ID
 
     w = _get_workspace_client()
-
     try:
         resp = w.genie.list_spaces()
         if resp and resp.spaces:
@@ -86,24 +84,10 @@ def _ensure_genie_space() -> str:
     except Exception as e:
         log.warning("Could not list Genie Spaces: %s", e)
 
-    log.info("No Genie Space found — creating one")
-    try:
-        import sys
-        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "pipeline"))
-        from setup_genie_space import main as setup_main
-
-        catalog = os.getenv("GOLD_CATALOG", "dilshad_shawki")
-        schema = os.getenv("GOLD_SCHEMA", "geospatial")
-        wh_id = os.getenv("DATABRICKS_WAREHOUSE_ID", "")
-        space_id = setup_main(catalog, schema, wh_id)
-        cfg.GENIE_SPACE_ID = space_id
-        return space_id
-    except Exception as e:
-        log.error("Failed to auto-provision Genie Space: %s", e)
-        raise ValueError(
-            "GENIE_SPACE_ID is not set and auto-provisioning failed. "
-            "Run setup_genie_space.py first."
-        ) from e
+    raise ValueError(
+        "GENIE_SPACE_ID is not set and no matching space found. "
+        "Run setup_genie_space.py or set the env var / app_config row."
+    )
 
 
 # ── Genie helpers ────────────────────────────────────────────────────────────
@@ -113,13 +97,15 @@ def _ask_genie(question: str, timeout_seconds: int = 120) -> pd.DataFrame:
     """Send a question to the Genie Space and return the result as a DataFrame.
 
     Genie generates the SQL; we then execute it via the DBSQL connector
-    (from db.py) to get full, reliable results.  This avoids known SDK
-    issues with data truncation in the Genie result API.
+    (from db.py) to get full, reliable results.
     """
+    import streamlit as st
     from db import execute_query
 
     space_id = _ensure_genie_space()
     w = _get_workspace_client()
+
+    log.info("Calling Genie space_id=%s, SDK has genie=%s", space_id, hasattr(w, 'genie'))
 
     try:
         msg = w.genie.start_conversation_and_wait(
@@ -128,11 +114,13 @@ def _ask_genie(question: str, timeout_seconds: int = 120) -> pd.DataFrame:
             timeout=datetime.timedelta(seconds=timeout_seconds),
         )
     except Exception as e:
-        log.warning("Genie conversation failed: %s", e)
+        log.error("Genie conversation failed: %s", e)
+        st.error(f"Genie API error: {type(e).__name__}: {e}")
         return pd.DataFrame()
 
     if not msg.attachments:
         log.warning("Genie returned no attachments for: %s", question[:80])
+        st.warning("Genie returned no SQL — it may need more instructions.")
         return pd.DataFrame()
 
     for attachment in msg.attachments:
@@ -147,6 +135,7 @@ def _ask_genie(question: str, timeout_seconds: int = 120) -> pd.DataFrame:
                 return df
             except Exception as e:
                 log.error("Failed to execute Genie SQL: %s", e)
+                st.error(f"Genie SQL execution failed: {e}")
                 return pd.DataFrame()
 
     log.warning("Genie attachments had no query for: %s", question[:80])
