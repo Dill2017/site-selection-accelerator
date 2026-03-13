@@ -1,5 +1,6 @@
 """Configuration for the Site Selection Accelerator."""
 
+import logging
 import os
 
 _CATALOG = os.getenv("GOLD_CATALOG", "dilshad_shawki")
@@ -7,31 +8,36 @@ _SCHEMA = os.getenv("GOLD_SCHEMA", "geospatial")
 
 GOLD_CITIES_TABLE = f"{_CATALOG}.{_SCHEMA}.gold_cities"
 GOLD_PLACES_TABLE = f"{_CATALOG}.{_SCHEMA}.gold_places"
+GOLD_PLACES_ENRICHED = f"{_CATALOG}.{_SCHEMA}.gold_places_enriched"
+APP_CONFIG_TABLE = f"{_CATALOG}.{_SCHEMA}.app_config"
 
-# Existing enriched data assets for brand search / competition analysis
-VS_INDEX_NAME = os.getenv(
-    "VS_INDEX_NAME", "beatrice_liew.geospatial.site_embeddings"
-)
-ENRICHED_TABLE = os.getenv(
-    "ENRICHED_TABLE", "beatrice_liew.geospatial.site_selection_embedding"
-)
+_log = logging.getLogger(__name__)
 
-VS_COLUMNS: list[str] = [
-    "id",
-    "h3",
-    "poi_primary_name",
-    "basic_category",
-    "poi_primary_category",
-    "brand_name_primary",
-    "address_line",
-    "locality",
-    "region",
-    "country",
-    "confidence",
-]
 
-BRAND_THRESHOLD: float = float(os.getenv("BRAND_THRESHOLD", "0.5"))
-COMPETITOR_THRESHOLD: float = float(os.getenv("COMPETITOR_THRESHOLD", "0.45"))
+def _resolve_genie_space_id() -> str:
+    """Read GENIE_SPACE_ID from env, falling back to the app_config table."""
+    from_env = os.getenv("GENIE_SPACE_ID", "")
+    if from_env:
+        return from_env
+
+    try:
+        from db import execute_query
+
+        df = execute_query(
+            f"SELECT config_value FROM {APP_CONFIG_TABLE} "
+            f"WHERE config_key = 'GENIE_SPACE_ID' LIMIT 1"
+        )
+        if not df.empty:
+            val = str(df.iloc[0]["config_value"])
+            _log.info("Loaded GENIE_SPACE_ID from app_config table: %s", val)
+            return val
+    except Exception as e:
+        _log.warning("Could not read GENIE_SPACE_ID from app_config: %s", e)
+
+    return ""
+
+
+GENIE_SPACE_ID: str = _resolve_genie_space_id()
 
 CATEGORY_GROUPS: dict[str, list[str]] = {
     "Food & Drink": [

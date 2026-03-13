@@ -17,8 +17,12 @@ import pandas as pd
 import streamlit as st
 from geopy.geocoders import Nominatim
 
-from brand_search import discover_brand_locations, find_competitors_in_similar_cells
-from config import CATEGORY_GROUPS, DEFAULT_H3_RESOLUTION, H3_RESOLUTIONS, BRAND_THRESHOLD, COMPETITOR_THRESHOLD
+from brand_search import (
+    discover_brand_locations,
+    find_competitors_in_similar_cells,
+    infer_location_categories,
+)
+from config import CATEGORY_GROUPS, DEFAULT_H3_RESOLUTION, H3_RESOLUTIONS
 from embeddings import run_embedding_pipeline
 from explainability import (
     build_brand_profile,
@@ -129,26 +133,6 @@ with st.sidebar:
             ),
         )
 
-    # -- Thresholds -----------------------------------------------------------
-    st.subheader("Search Thresholds")
-    brand_threshold = st.slider(
-        "Brand match threshold",
-        min_value=0.0,
-        max_value=1.0,
-        value=BRAND_THRESHOLD,
-        step=0.05,
-        help="Minimum similarity score to consider a POI as a brand location. "
-        "Lower for generic queries, higher for exact brand names.",
-    )
-    competitor_threshold = st.slider(
-        "Competitor threshold",
-        min_value=0.0,
-        max_value=1.0,
-        value=COMPETITOR_THRESHOLD,
-        step=0.05,
-        help="Minimum score to consider a POI as a competitor.",
-    )
-
     # -- Competition analysis -----------------------------------------------
     st.subheader("Competition Analysis")
     enable_competition = st.checkbox("Enable competition penalty", value=True)
@@ -222,35 +206,24 @@ if run_button:
 
     # -- Resolve brand locations -------------------------------------------
     brand_pois_df = None
-    all_search_results = None
     if input_mode == "Brand Name":
-        with st.spinner(f"Searching for '{brand_query}' locations…"):
-            brand_locations, _, brand_pois_df, all_search_results = discover_brand_locations(
-                brand_query, resolution, country_filter=country,
-                city_filter=city, threshold=brand_threshold,
+        with st.spinner(f"Searching for '{brand_query}' locations via Genie…"):
+            brand_locations, _, brand_pois_df = discover_brand_locations(
+                brand_query, resolution, country=country, city=city,
             )
 
         if not brand_locations:
             st.warning(
-                f"No locations above brand threshold ({brand_threshold}) for "
-                f"'{brand_query}' in {country}. Check the raw results above — "
-                "lower the **Brand match threshold** slider and re-run."
+                f"No locations found for '{brand_query}' in {city}, {country}. "
+                "Try a different brand name or check that the Genie Space is configured."
             )
             st.stop()
-        st.info(f"Found {len(brand_locations)} '{brand_query}' location(s) in {country}")
+        st.info(f"Found {len(brand_locations)} '{brand_query}' location(s) in {city}, {country}")
 
         with st.expander("🔍 Brand Search Debug", expanded=False):
-            if all_search_results is not None and not all_search_results.empty:
-                show_cols = [c for c in ["score", "poi_primary_name", "brand_name_primary",
-                             "basic_category", "poi_primary_category", "locality", "h3"]
-                             if c in all_search_results.columns]
-                st.caption(f"**All Vector Search results** ({len(all_search_results)} rows, threshold = {brand_threshold})")
-                st.dataframe(all_search_results[show_cols].sort_values("score", ascending=False), use_container_width=True)
             if brand_pois_df is not None and not brand_pois_df.empty:
-                st.caption(f"**Refined brand POIs** ({len(brand_pois_df)} rows after filtering)")
-                show_cols2 = [c for c in ["score", "poi_primary_name", "brand_name_primary",
-                              "basic_category", "locality"] if c in brand_pois_df.columns]
-                st.dataframe(brand_pois_df[show_cols2].sort_values("score", ascending=False), use_container_width=True)
+                st.caption(f"**Genie results** ({len(brand_pois_df)} rows)")
+                st.dataframe(brand_pois_df, use_container_width=True)
 
         if brand_pois_df is not None and not brand_pois_df.empty:
             cats = brand_pois_df.get("basic_category", pd.Series()).dropna().unique()[:5]
@@ -261,6 +234,16 @@ if run_button:
         if not brand_locations:
             st.error("No valid brand locations were parsed. Please check your input.")
             st.stop()
+
+        if enable_competition and beta > 0:
+            with st.spinner("Inferring brand categories from nearby POIs…"):
+                brand_pois_df = infer_location_categories(
+                    brand_locations, resolution, country, city,
+                )
+            if brand_pois_df is not None and not brand_pois_df.empty:
+                cats = brand_pois_df.get("basic_category", pd.Series()).dropna().unique()[:5]
+                if len(cats) > 0:
+                    st.caption(f"Inferred categories: **{', '.join(cats)}**")
 
     # -- Pipeline execution --------------------------------------------------
     progress = st.progress(0, text="Tessellating city with H3…")
@@ -338,17 +321,18 @@ if run_button:
     else:
         scored["similarity"] = np.zeros(len(scored))
 
-    # -- Competition analysis (when brand name search is used) ---------------
+    # -- Competition analysis (all input modes) ──────────────────────────────
     competitor_pois = None
-    if brand_query and enable_competition and beta > 0:
+    if enable_competition and beta > 0 and brand_pois_df is not None and not brand_pois_df.empty:
         progress.progress(85, text="Finding competitors in similar areas…")
 
         competition, competitor_pois = find_competitors_in_similar_cells(
             scored,
             brand_pois=brand_pois_df,
-            brand_query=brand_query,
+            brand_query=brand_query or "",
             min_similarity=0.5,
-            country_filter=country,
+            country=country,
+            city=city,
         )
 
         if competitor_pois is not None and not competitor_pois.empty:

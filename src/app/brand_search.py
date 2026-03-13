@@ -1,16 +1,20 @@
-"""Brand discovery and competition analysis via text-feature embeddings.
+"""Brand discovery and competition analysis via Genie Space.
 
-Uses the existing Vector Search index on beatrice_liew.geospatial.site_embeddings
-which embeds concatenated POI text features:
-    name: X | category: Y | brand: Z | address: ... | locality: ... | country: ...
+Uses a Databricks Genie Space backed by gold_places_enriched and
+gold_cities tables.  Genie generates SQL from natural language,
+using h3_polyfillash3 to convert city polygons into H3 cells for
+fast spatial filtering (no expensive ST_CONTAINS JOINs).
 
-The index returns POIs with H3 cell assignments, allowing us to:
-1. Discover a brand's existing locations from a free-text query
-2. Identify competitor POIs and aggregate them per H3 cell
+If GENIE_SPACE_ID is not set in env or app_config, the app will
+auto-provision one on first use.
+
+For competition analysis, direct SQL on gold_places_enriched is
+used since the parameters (H3 cells, categories) are already structured.
 """
 
 from __future__ import annotations
 
+import datetime
 import json
 import logging
 import os
@@ -19,12 +23,7 @@ import h3
 import pandas as pd
 from databricks.sdk import WorkspaceClient
 
-from config import (
-    BRAND_THRESHOLD,
-    COMPETITOR_THRESHOLD,
-    VS_COLUMNS,
-    VS_INDEX_NAME,
-)
+import config as cfg
 
 log = logging.getLogger(__name__)
 
@@ -35,16 +34,16 @@ def h3_int_to_hex(val: int) -> str:
         val = val + (1 << 64)
     return h3.int_to_str(val)
 
+
 _ws_client: WorkspaceClient | None = None
 
 
 def _get_workspace_client() -> WorkspaceClient:
-    """Return a WorkspaceClient, caching after first successful init.
+    """Return a cached WorkspaceClient.
 
-    On Databricks Apps, DATABRICKS_RUNTIME_VERSION is set and the default
-    Config() works via service principal. Locally, we use the DEFAULT
-    profile (PAT) to avoid the databricks-cli subprocess which segfaults
-    inside Streamlit's multi-threaded environment.
+    On Databricks Apps the default Config() uses the service principal.
+    Locally we use the DEFAULT profile (PAT) to avoid databricks-cli
+    subprocess segfaults inside Streamlit.
     """
     global _ws_client
     if _ws_client is not None:
@@ -58,190 +57,210 @@ def _get_workspace_client() -> WorkspaceClient:
     return _ws_client
 
 
-def search_pois(
-    query: str,
-    num_results: int = 200,
-    filters: dict | None = None,
-) -> pd.DataFrame:
-    """Search for POIs matching a query via Vector Search.
+# ── Genie Space auto-provisioning ────────────────────────────────────────────
 
-    Returns a DataFrame with the columns defined in ``VS_COLUMNS`` plus a
-    ``score`` column from the index's similarity ranking.
+_GENIE_DISPLAY_NAME = "Site Selection - Brand & Competition Explorer"
+
+
+def _ensure_genie_space() -> str:
+    """Return the GENIE_SPACE_ID, creating the space if it doesn't exist.
+
+    Resolution order:
+    1. cfg.GENIE_SPACE_ID (env var or app_config table)
+    2. Find existing space by name
+    3. Create a new space
     """
+    if cfg.GENIE_SPACE_ID:
+        return cfg.GENIE_SPACE_ID
+
     w = _get_workspace_client()
-    kwargs: dict = dict(
-        index_name=VS_INDEX_NAME,
-        query_text=query,
-        columns=VS_COLUMNS,
-        num_results=num_results,
-    )
-    if filters:
-        kwargs["filters_json"] = json.dumps(filters)
-
-    results = w.vector_search_indexes.query_index(**kwargs)
-    columns = [col.name for col in results.manifest.columns]
-    rows: list[dict] = []
-    if results.result and results.result.data_array:
-        for row in results.result.data_array:
-            rows.append(dict(zip(columns, row)))
-
-    df = pd.DataFrame(rows)
-    if df.empty:
-        return df
-
-    if "score" not in df.columns:
-        df["score"] = 1.0 - (df.reset_index().index / len(df))
-
-    return df
-
-
-def _detect_category_intent(query: str) -> str | None:
-    """Ask the LLM what business category the user is searching for.
-
-    Returns a single category string suitable for use as a Vector Search
-    filter on ``basic_category``, or *None* if detection fails.
-    """
-    prompt = f"""A user is searching for business locations with this query: "{query}"
-
-What single business category best describes the type of place they are looking for?
-Pick from common POI categories such as: hotel, cafe, coffee_shop, restaurant,
-fast_food_restaurant, bar, bakery, gym, pharmacy, convenience_store, supermarket,
-clothing_store, bank, hospital, car_rental, gas_station, shopping_mall, park,
-department_store, hair_salon, beauty_salon, school, dentist, movie_theater,
-furniture_store, professional_services, real_estate, education, lodging,
-accommodation, pub, nightclub.
-
-Return ONLY the single category string, nothing else. If unsure, return "unknown".
-Example: hotel"""
 
     try:
-        w = _get_workspace_client()
-        response = w.serving_endpoints.query(
-            name="databricks-claude-opus-4-6",
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=30,
-            temperature=0.0,
-        )
-        cat = response.choices[0].message.content.strip().lower().strip('"\'.')
-        if cat and cat != "unknown":
-            log.info("Intent detection for '%s': category = '%s'", query, cat)
-            return cat
+        resp = w.genie.list_spaces()
+        if resp and resp.spaces:
+            for space in resp.spaces:
+                if space.title == _GENIE_DISPLAY_NAME:
+                    log.info("Found existing Genie Space: %s", space.space_id)
+                    cfg.GENIE_SPACE_ID = space.space_id
+                    return space.space_id
     except Exception as e:
-        log.warning("Intent detection failed: %s", e)
+        log.warning("Could not list Genie Spaces: %s", e)
 
-    return None
+    log.info("No Genie Space found — creating one")
+    try:
+        import sys
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "pipeline"))
+        from setup_genie_space import main as setup_main
+
+        catalog = os.getenv("GOLD_CATALOG", "dilshad_shawki")
+        schema = os.getenv("GOLD_SCHEMA", "geospatial")
+        wh_id = os.getenv("DATABRICKS_WAREHOUSE_ID", "")
+        space_id = setup_main(catalog, schema, wh_id)
+        cfg.GENIE_SPACE_ID = space_id
+        return space_id
+    except Exception as e:
+        log.error("Failed to auto-provision Genie Space: %s", e)
+        raise ValueError(
+            "GENIE_SPACE_ID is not set and auto-provisioning failed. "
+            "Run setup_genie_space.py first."
+        ) from e
 
 
-def _refine_brand_pois(query: str, brand_pois: pd.DataFrame) -> pd.DataFrame:
-    """Narrow brand POIs to the intended business type.
+# ── Genie helpers ────────────────────────────────────────────────────────────
 
-    Vector Search matches on shared words (e.g. "Premier Inn" also returns
-    "Premier" convenience stores).  We refine in two stages:
-    1. If brand_name_primary is available, prefer POIs whose brand name
-       closely matches the query (≥3 hits).
-    2. Otherwise, keep only POIs whose category matches the dominant
-       category from the top-scoring results.
+
+def _ask_genie(question: str, timeout_seconds: int = 120) -> pd.DataFrame:
+    """Send a question to the Genie Space and return the result as a DataFrame.
+
+    Genie generates the SQL; we then execute it via the DBSQL connector
+    (from db.py) to get full, reliable results.  This avoids known SDK
+    issues with data truncation in the Genie result API.
     """
-    q_lower = query.lower().strip()
+    from db import execute_query
 
-    # Stage 1: brand-name match (e.g. "premier inn" ⊂ brand_name_primary)
-    if "brand_name_primary" in brand_pois.columns:
-        def _brand_matches(val):
-            if pd.isna(val):
-                return False
-            val_lower = str(val).lower()
-            return q_lower in val_lower
-        name_match = brand_pois[brand_pois["brand_name_primary"].apply(_brand_matches)]
-        if len(name_match) >= 3:
-            log.info(
-                "Brand-name refinement for '%s': %d → %d POIs",
-                query, len(brand_pois), len(name_match),
-            )
-            return name_match.copy()
+    space_id = _ensure_genie_space()
+    w = _get_workspace_client()
 
-    # Stage 2: dominant-category filter from highest-scoring results
-    cat_col = None
-    for col in ("basic_category", "poi_primary_category"):
-        if col in brand_pois.columns:
-            cat_col = col
-            break
-    if cat_col:
-        top_hits = brand_pois.nlargest(min(20, len(brand_pois)), "score")
-        dominant = top_hits[cat_col].mode()
-        if not dominant.empty:
-            core_cat = dominant.iloc[0]
-            cat_match = brand_pois[brand_pois[cat_col] == core_cat]
-            if len(cat_match) >= 3:
-                log.info(
-                    "Category refinement for '%s': keeping '%s' (%d → %d POIs)",
-                    query, core_cat, len(brand_pois), len(cat_match),
-                )
-                return cat_match.copy()
+    try:
+        msg = w.genie.start_conversation_and_wait(
+            space_id=space_id,
+            content=question,
+            timeout=datetime.timedelta(seconds=timeout_seconds),
+        )
+    except Exception as e:
+        log.warning("Genie conversation failed: %s", e)
+        return pd.DataFrame()
 
-    return brand_pois
+    if not msg.attachments:
+        log.warning("Genie returned no attachments for: %s", question[:80])
+        return pd.DataFrame()
+
+    for attachment in msg.attachments:
+        if attachment.query is not None:
+            sql = attachment.query.query
+            if not sql:
+                continue
+            log.info("Genie SQL for '%s': %s", question[:60], sql[:200])
+            try:
+                df = execute_query(sql)
+                log.info("Genie → DBSQL returned %d rows", len(df))
+                return df
+            except Exception as e:
+                log.error("Failed to execute Genie SQL: %s", e)
+                return pd.DataFrame()
+
+    log.warning("Genie attachments had no query for: %s", question[:80])
+    return pd.DataFrame()
+
+
+# ── Brand discovery ──────────────────────────────────────────────────────────
 
 
 def discover_brand_locations(
     query: str,
     resolution: int,
-    country_filter: str | None = None,
-    city_filter: str | None = None,
-    threshold: float | None = None,
-) -> tuple[list[dict], list[int], pd.DataFrame, pd.DataFrame]:
-    """Find a brand's existing locations from a text query.
+    country: str,
+    city: str,
+) -> tuple[list[dict], list[int], pd.DataFrame]:
+    """Find a brand's existing locations via Genie Space.
+
+    Genie uses h3_polyfillash3 to convert the city polygon into H3
+    cells and filters POIs by cell membership for fast spatial queries.
+    H3 cells are returned as hex strings.
 
     Returns
     -------
-    brand_locations : list of {lat, lon} dicts (feeds into existing pipeline)
+    brand_locations : list of {lat, lon} dicts
     brand_cells : list of H3 cell IDs (BIGINT)
-    brand_pois : DataFrame of the matched brand POIs (above threshold)
-    all_results : DataFrame of ALL raw search results (for debugging)
+    brand_pois : DataFrame of matched POIs
     """
-    if threshold is None:
-        threshold = BRAND_THRESHOLD
+    question = (
+        f"Find all {query} locations within the city boundary of {city}, "
+        f"{country}. Use h3_polyfillash3 on the gold_cities polygon to get "
+        f"the H3 cells covering the city, then filter gold_places_enriched "
+        f"where h3_longlatash3(lon, lat, {resolution}) is in that set. "
+        f"Return poi_id, poi_primary_name, basic_category, "
+        f"brand_name_primary, lon, lat, "
+        f"h3_h3tostring(h3_longlatash3(lon, lat, {resolution})) as h3_cell"
+    )
 
-    filters = {}
-    if country_filter:
-        filters["country"] = country_filter
-    if city_filter:
-        filters["locality"] = city_filter
+    brand_pois = _ask_genie(question)
 
-    intent_cat = _detect_category_intent(query)
-
-    if intent_cat:
-        filtered_filters = {**filters, "basic_category": intent_cat}
-        results = search_pois(query, num_results=200, filters=filtered_filters or None)
-        if len(results) < 5:
-            log.info(
-                "Category filter '%s' returned only %d results — retrying without it",
-                intent_cat, len(results),
-            )
-            results = search_pois(query, num_results=200, filters=filters or None)
-    else:
-        results = search_pois(query, num_results=200, filters=filters or None)
-
-    if results.empty:
-        return [], [], results, results
-
-    brand_pois = results[results["score"] >= threshold].copy()
     if brand_pois.empty:
-        return [], [], brand_pois, results
+        return [], [], brand_pois
 
-    brand_pois = _refine_brand_pois(query, brand_pois)
+    for col in ("lon", "lat"):
+        if col in brand_pois.columns:
+            brand_pois[col] = pd.to_numeric(brand_pois[col], errors="coerce")
+
+    brand_pois = brand_pois.dropna(subset=["lon", "lat"])
 
     locations: list[dict] = []
     cells: list[int] = []
     for _, row in brand_pois.iterrows():
-        h3_hex = str(row["h3"])
-        try:
-            lat, lon = h3.cell_to_latlng(h3_hex)
-        except Exception:
-            log.warning("Invalid H3 cell '%s', skipping", h3_hex)
-            continue
-        locations.append({"lat": lat, "lon": lon})
-        cells.append(h3.str_to_int(h3_hex))
+        locations.append({"lat": float(row["lat"]), "lon": float(row["lon"])})
+        h3_val = row.get("h3_cell")
+        if h3_val is not None and str(h3_val).strip():
+            try:
+                cells.append(h3.str_to_int(str(h3_val)))
+            except Exception:
+                pass
 
-    return locations, cells, brand_pois, results
+    return locations, cells, brand_pois
+
+
+# ── Infer categories for lat/lon input mode ──────────────────────────────────
+
+
+def infer_location_categories(
+    locations: list[dict],
+    resolution: int,
+    country: str,
+    city: str,
+) -> pd.DataFrame:
+    """Reverse-lookup POIs at the given coordinates to infer brand categories.
+
+    Queries gold_places_enriched for POIs in the same H3 cells as the
+    input locations, filtered by the city polygon.
+    """
+    from db import execute_query
+
+    h3_hexes = set()
+    for loc in locations:
+        hex_str = h3.latlng_to_cell(loc["lat"], loc["lon"], resolution)
+        h3_hexes.add(hex_str)
+
+    if not h3_hexes:
+        return pd.DataFrame()
+
+    h3_list = ", ".join(f"'{h}'" for h in h3_hexes)
+
+    query = f"""
+    WITH city_h3 AS (
+        SELECT explode(h3_polyfillash3(
+            geom_wkt, {resolution}
+        )) AS h3_cell
+        FROM {cfg.GOLD_CITIES_TABLE}
+        WHERE country = '{country}' AND city_name = '{city}'
+    )
+    SELECT p.poi_id, p.poi_primary_name, p.basic_category,
+           p.poi_primary_category, p.brand_name_primary,
+           p.lon, p.lat
+    FROM {cfg.GOLD_PLACES_ENRICHED} p
+    WHERE h3_longlatash3(p.lon, p.lat, {resolution})
+          IN (SELECT h3_cell FROM city_h3)
+      AND h3_h3tostring(h3_longlatash3(p.lon, p.lat, {resolution})) IN ({h3_list})
+      AND p.lon IS NOT NULL AND p.lat IS NOT NULL
+    """
+
+    try:
+        return execute_query(query)
+    except Exception as e:
+        log.error("Location category inference failed: %s", e)
+        return pd.DataFrame()
+
+
+# ── Category filtering ───────────────────────────────────────────────────────
 
 
 def _filter_categories(
@@ -249,13 +268,7 @@ def _filter_categories(
     brand_pois: pd.DataFrame,
     min_pct: float = 0.05,
 ) -> set[str]:
-    """Two-stage filter: frequency first, then LLM with industry context.
-
-    1. Count category frequency across brand POIs.
-    2. Identify the dominant categories (top by count).
-    3. Ask the LLM which of the remaining categories belong to the
-       same retail / consumer vertical as the dominant ones.
-    """
+    """Two-stage filter: frequency first, then LLM with industry context."""
     counts: dict[str, int] = {}
     for col in ("basic_category", "poi_primary_category"):
         if col in brand_pois.columns:
@@ -332,31 +345,26 @@ Competitors:"""
     return set(dominant_categories)
 
 
+# ── Competition analysis ─────────────────────────────────────────────────────
+
+
 def find_competitors_in_similar_cells(
     scored: pd.DataFrame,
     brand_pois: pd.DataFrame | None = None,
     brand_query: str = "",
     min_similarity: float = 0.5,
-    country_filter: str | None = None,
+    country: str = "",
+    city: str = "",
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Find competitors by looking at what businesses exist in cells with
-    high similarity to the brand.
-
-    This is data-driven: instead of guessing competitors, we look at
-    the actual POIs in neighborhoods that match the brand's profile.
-
-    Parameters
-    ----------
-    min_similarity : cells with similarity >= this value are searched.
-        Default 0.5 matches the point where the heatmap turns red.
+    """Find competitors in high-similarity cells via direct SQL on
+    gold_places_enriched with polygon-based city filtering.
 
     Returns
     -------
     comp_per_cell : DataFrame with h3_hex, competitor_count, top_competitors
-    competitor_pois : DataFrame of individual competitor POIs (for map layer)
+    competitor_pois : DataFrame of individual competitor POIs
     """
     from db import execute_query
-    from config import ENRICHED_TABLE
 
     empty_agg = pd.DataFrame(
         columns=["h3_hex", "competitor_count", "top_competitors"]
@@ -368,42 +376,40 @@ def find_competitors_in_similar_cells(
         return empty_agg, empty_pois
 
     brand_categories = _filter_categories(brand_query, brand_pois, min_pct=0.05)
-
     if not brand_categories:
         log.warning("No brand categories found, cannot search for competitors")
         return empty_agg, empty_pois
 
-    # Build exclusion sets — exact brand names + substring for the query
     brand_query_lower = brand_query.lower().strip() if brand_query else ""
     exact_brand_names: set[str] = set()
-    if brand_pois is not None and "brand_name_primary" in brand_pois.columns:
-        exact_brand_names = set(brand_pois["brand_name_primary"].dropna().str.lower().unique())
+    if "brand_name_primary" in brand_pois.columns:
+        exact_brand_names = set(
+            brand_pois["brand_name_primary"].dropna().str.lower().unique()
+        )
 
-    # Take all cells above the similarity threshold (excluding brand cells)
     is_brand = scored.get("is_brand_cell", False)
     candidate_cells = scored[
         (~is_brand) & (scored["similarity"] >= min_similarity)
     ]
-
     if candidate_cells.empty:
         return empty_agg, empty_pois
 
     h3_ints = candidate_cells["h3_cell"].tolist()
     h3_hexes = [h3_int_to_hex(c) for c in h3_ints]
     h3_list = ", ".join(f"'{h}'" for h in h3_hexes)
-
     cat_list = ", ".join(f"'{c}'" for c in brand_categories)
 
     query = f"""
-    SELECT id, h3, poi_primary_name, basic_category,
-           poi_primary_category, brand_name_primary,
-           address_line, locality, region, country
-    FROM {ENRICHED_TABLE}
-    WHERE h3 IN ({h3_list})
-      AND (basic_category IN ({cat_list}) OR poi_primary_category IN ({cat_list}))
+    SELECT p.poi_id AS id,
+           h3_h3tostring(h3_longlatash3(p.lon, p.lat, 9)) AS h3,
+           p.poi_primary_name, p.basic_category,
+           p.poi_primary_category, p.brand_name_primary,
+           p.address_line, p.locality, p.region, p.country
+    FROM {cfg.GOLD_PLACES_ENRICHED} p
+    WHERE h3_h3tostring(h3_longlatash3(p.lon, p.lat, 9)) IN ({h3_list})
+      AND (p.basic_category IN ({cat_list}) OR p.poi_primary_category IN ({cat_list}))
+      AND p.lon IS NOT NULL AND p.lat IS NOT NULL
     """
-    if country_filter:
-        query += f"\n      AND country = '{country_filter}'"
 
     log.info(
         "Querying competitors: %d cells, %d categories: %s",
@@ -419,7 +425,6 @@ def find_competitors_in_similar_cells(
     if competitors.empty:
         return empty_agg, empty_pois
 
-    # Exclude the brand itself: exact match on brand field, substring on query
     def _is_brand(row):
         name = str(row.get("poi_primary_name", "")).lower()
         brand = str(row.get("brand_name_primary", "")).lower()
@@ -443,12 +448,10 @@ def find_competitors_in_similar_cells(
         [competitors.reset_index(drop=True), coords], axis=1
     )
 
-    # Pre-compute global popularity (total locations across all cells)
     global_popularity = competitors["poi_primary_name"].dropna().value_counts()
 
     def _top3_with_counts(names: pd.Series) -> str:
         cell_counts = names.dropna().value_counts()
-        # Sort by cell count first, then by global popularity as tiebreaker
         ranked = cell_counts.to_frame("cell_n")
         ranked["global_n"] = ranked.index.map(
             lambda n: global_popularity.get(n, 0)
@@ -471,5 +474,3 @@ def find_competitors_in_similar_cells(
     )
 
     return comp_per_cell, competitors
-
-

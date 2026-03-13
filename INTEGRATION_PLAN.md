@@ -1,28 +1,31 @@
-# Text Embedding Integration Plan — Checkpoint
+# Integration Plan — Genie + H3 Polyfill Architecture
 
-Extends the site-selection-accelerator with POI text-feature embeddings to
-enable **brand search by name** and **competition-aware whitespace scoring**.
+Extends the site-selection-accelerator with **Databricks Genie** for natural
+language brand discovery and **h3_polyfillash3** for fast spatial filtering,
+replacing the previous Vector Search approach.
 
-> **Status:** In progress. Brand search, competition analysis, opportunity
-> scoring, LLM intent detection, brand refinement, POI density tiebreaking,
-> and single-pass normalisation are implemented and running locally.
+> **Status:** Implemented. Genie-based brand discovery, h3_polyfillash3
+> spatial filtering, competition analysis (all input modes), auto-provisioned
+> Genie Space, and density-aware brand location visualisation are running.
 
 ---
 
-## Existing Data Assets
+## Data Assets
 
 | Asset | Location | Contents |
 |:---|:---|:---|
-| Enriched POI table | `beatrice_liew.geospatial.site_selection_embedding` | Overture POIs with enriched fields + H3 cell assignments (hex strings) |
-| Vector Search index | `beatrice_liew.geospatial.site_embeddings` | Text-feature embeddings on concatenated POI string |
-| Gold tables | `beatrice_liew.geospatial.gold_cities`, `gold_places` | Copied to `e2-demo-field-eng` workspace for local dev |
+| Enriched POI table | `{catalog}.{schema}.gold_places_enriched` | Flattened CARTO place data with names, categories, brands, addresses, coordinates |
+| City polygons | `{catalog}.{schema}.gold_cities` | City metadata with WKT polygons (real or bbox fallback), bounding boxes |
+| Original POIs | `{catalog}.{schema}.gold_places` | Simpler POI table with extracted coords and primary category |
+| App config | `{catalog}.{schema}.app_config` | Key-value store for `GENIE_SPACE_ID` |
+| Genie Space | Auto-created or env var | NL→SQL interface on gold_places_enriched + gold_cities |
 
-**Geographic scope:** UK (current data coverage). Default country is GB,
+**Geographic scope:** Global (CARTO Overture Maps). Default country is GB,
 default city is London.
 
 ---
 
-## Architecture (Implemented)
+## Architecture
 
 ```
                           ┌─────────────────────────┐
@@ -35,15 +38,16 @@ default city is London.
                           │  Brand Discovery               │
                           │  (brand_search.py)             │
                           │                                │
-                          │  1. LLM intent detection       │
-                          │     → target category filter   │
-                          │  2. Vector Search on           │
-                          │     site_embeddings index      │
-                          │     (pre-filtered by category) │
-                          │  3. Refine brand POIs:         │
-                          │     a. brand_name match        │
-                          │     b. dominant category       │
-                          │  → extract lat/lon + H3 cells  │
+                          │  1. _ensure_genie_space()      │
+                          │     → find/create Genie Space  │
+                          │  2. _ask_genie(question)       │
+                          │     → Genie generates SQL      │
+                          │     → execute via DBSQL        │
+                          │  3. SQL pattern:               │
+                          │     h3_polyfillash3(geom_wkt)  │
+                          │     → H3 cell membership IN    │
+                          │     → ILIKE brand matching     │
+                          │  → brand locations + H3 hex    │
                           └──┬─────────────────────────────┘
                              │
           ┌──────────────────▼──────────────┐
@@ -63,15 +67,13 @@ default city is London.
           │                                               │
           │  1. Take all cells above min_similarity       │
           │  2. Convert h3_cell ints → hex strings        │
-          │     (h3_int_to_hex handles signed BIGINTs)    │
           │  3. Filter brand categories:                  │
           │     a. Frequency gate (≥5% of brand POIs)     │
           │     b. LLM industry filter (same vertical)    │
-          │  4. SQL: query enriched table for POIs in     │
-          │     those cells matching those categories     │
+          │  4. SQL: gold_places_enriched WHERE           │
+          │     h3_h3tostring(...) IN (hex_list)           │
           │  5. Exclude the brand itself by name          │
-          │  6. Aggregate: comp_per_cell (h3_hex,         │
-          │     competitor_count, top_competitors)         │
+          │  6. Aggregate: comp_per_cell                  │
           └──────────────┬───────────────────────────────┘
                          │
           ┌──────────────▼───────────────────────────────┐
@@ -86,19 +88,82 @@ default city is London.
           └──────────────┬───────────────────────────────┘
                          │
           ┌──────────────▼───────────────────────────────┐
-          │  Map + Debug Tables                           │
-          │  (map_viz.py, app.py)                         │
+          │  Map Visualisation                            │
+          │  (map_viz.py)                                 │
           │                                               │
           │  • H3 heatmap coloured by similarity           │
-          │  • Blue dots = brand locations                │
+          │  • Blue dots = brand locations (snapped to    │
+          │    H3 centres, light→dark by density)         │
           │  • Green dots = top 2% opportunities          │
-          │    (sorted by opp score + POI density)        │
-          │  • Tooltip: opp score, similarity, POI        │
-          │    density, competitor count, top 3 names,    │
-          │    POI mix vs brand avg                       │
-          │  • Debug expanders: merged table, comp/cell   │
+          │  • Contextual tooltips per layer              │
           └──────────────────────────────────────────────┘
 ```
+
+---
+
+## Spatial Filtering: h3_polyfillash3 (not ST_CONTAINS)
+
+The previous approach used `JOIN ... ON country` + per-row `ST_CONTAINS`,
+which created an expensive cross-join (every POI checked against every city
+polygon in the country). This has been replaced with `h3_polyfillash3`:
+
+### Pattern
+
+```sql
+WITH city_h3 AS (
+    SELECT explode(h3_polyfillash3(geom_wkt, 9)) AS h3_cell
+    FROM gold_cities
+    WHERE country = 'GB' AND city_name = 'London'
+)
+SELECT p.*, h3_h3tostring(h3_longlatash3(p.lon, p.lat, 9)) AS h3_cell
+FROM gold_places_enriched p
+WHERE h3_longlatash3(p.lon, p.lat, 9) IN (SELECT h3_cell FROM city_h3)
+  AND p.lon IS NOT NULL AND p.lat IS NOT NULL
+```
+
+**Why this is faster:**
+1. `h3_polyfillash3` runs once on the city polygon WKT string (not GEOMETRY)
+2. Produces a finite set of H3 BIGINT cells
+3. POI filtering becomes a simple integer `IN` subquery — no per-row geometry
+4. `h3_h3tostring` converts to hex only for the output column
+
+**Important:** `h3_polyfillash3` accepts WKT STRING or WKB BINARY, not
+GEOMETRY. Pass `geom_wkt` directly — do NOT wrap in `ST_GeomFromText()`.
+
+**Note:** `gold_cities.has_polygon` indicates whether a real polygon exists
+(vs a synthetic bbox fallback). Both produce valid WKT for `h3_polyfillash3`,
+so the `has_polygon` filter is NOT used in queries.
+
+---
+
+## Genie Space Integration
+
+### Auto-Provisioning
+
+The `GENIE_SPACE_ID` is resolved in this order:
+1. `GENIE_SPACE_ID` environment variable
+2. `app_config` table (`config_key = 'GENIE_SPACE_ID'`)
+3. Find existing space by name ("Site Selection - Brand & Competition Explorer")
+4. Create a new space via `setup_genie_space.py`
+
+This means end users can:
+- Set the env var for immediate use
+- Run the ETL job to auto-create and persist the ID
+- Let the app auto-provision on first use
+
+### Genie Space Configuration
+
+The `setup_genie_space.py` script builds a `serialized_space` JSON with:
+
+- **Tables**: `gold_cities` and `gold_places_enriched` (sorted alphabetically — required by the API)
+- **Text instructions**: spatial filtering pattern using `h3_polyfillash3`, H3 output as hex strings, brand matching via ILIKE
+- **Example question-SQL pairs**: concrete Starbucks/London example showing the full CTE pattern
+
+### Genie → DBSQL Execution
+
+The `_ask_genie()` function extracts the SQL that Genie generates and executes
+it directly via the DBSQL connector (`db.execute_query`). This bypasses known
+SDK issues with data truncation in the Genie result API.
 
 ---
 
@@ -142,115 +207,76 @@ def h3_int_to_hex(val: int) -> str:
     return h3.int_to_str(val)
 ```
 
-This is used in:
-- `similarity.compute_opportunity_score` — adds `h3_hex` to `scored` before
-  merging with `comp_per_cell`
-- `brand_search.find_competitors_in_similar_cells` — converts candidate cell
-  ints to hex strings for the SQL `WHERE h3 IN (...)` query
-- `map_viz._h3_int_to_hex` — converts cell ints to hex strings for pydeck's
-  `H3HexagonLayer`
+Genie returns H3 cells as hex strings via `h3_h3tostring()`, so the brand
+discovery path already produces hex strings directly.
 
 ---
 
-## LLM Intent Detection (Pre-Filter)
+## Competition Analysis
 
-Before calling Vector Search, an LLM identifies the target business category
-from the user's free-text query. This pre-filters Vector Search by
-`basic_category`, scoping results to the correct business type:
+### For brand name input
 
-- `"budget hotels"` → LLM returns `hotel` → VS only searches hotels
-- `"Premier Inn"` → LLM returns `hotel` → no convenience stores
-- `"artisan coffee shops"` → LLM returns `cafe` → no car rentals
+1. Genie discovers brand POIs → extract categories
+2. Two-stage category filter (frequency gate + LLM industry filter)
+3. Query `gold_places_enriched` for competitors in high-similarity cells
+   matching those categories (direct SQL, no Genie — parameters are structured)
 
-**Fallback:** if the filtered search returns fewer than 5 results (LLM
-guessed wrong or category name mismatch), retries without the category
-filter.
+### For lat/lon or address input
 
-Implemented in `brand_search._detect_category_intent()`.
+1. `infer_location_categories()` reverse-looks up POIs in the same H3 cells
+   as the input locations (filtered by city polygon via h3_polyfillash3)
+2. Same two-stage category filter + competitor query
 
----
+### Competition query pattern
 
-## Brand POI Refinement
+The competition query doesn't need a city polygon filter because it already
+has a specific list of H3 hex cells from the similarity scoring:
 
-Vector Search matches on shared tokens (e.g. "Premier Inn" also returns
-"Premier" convenience stores). After the threshold filter, a two-stage
-refinement cleans up false positives:
-
-### Stage 1: Brand Name Match
-
-If `brand_name_primary` is available, keep only POIs where the query is a
-substring of the brand name (e.g. `"premier inn" in "Premier Inn London
-Waterloo"` → kept; `"premier inn" in "Premier"` → excluded). Requires ≥3
-matches to activate.
-
-### Stage 2: Dominant Category
-
-If brand name matching doesn't apply or gives too few hits, identify the
-most common category from the top 20 results by score, and keep only POIs
-matching that category (e.g. if 80% are "hotel", drop the rest).
-
-Implemented in `brand_search._refine_brand_pois()`.
+```sql
+SELECT p.poi_id AS id,
+       h3_h3tostring(h3_longlatash3(p.lon, p.lat, 9)) AS h3, ...
+FROM gold_places_enriched p
+WHERE h3_h3tostring(h3_longlatash3(p.lon, p.lat, 9)) IN ({h3_list})
+  AND (p.basic_category IN ({cat_list}) OR p.poi_primary_category IN ({cat_list}))
+```
 
 ---
 
-## Similarity Normalisation (Single-Pass)
+## Map Visualisation Changes
 
-**Problem:** The original code normalised cosine similarity twice:
+### Brand location dots
 
-1. `similarity.compute_similarity()` — across ALL cells (city + rural
-   brand neighbourhood cells)
-2. `app.py` — re-normalised after filtering to city cells only
+- **Snapped to H3 cell centres** — aligns with the hexagon grid
+- **Colour gradient** — light blue (1 location per cell) to dark navy
+  (max locations per cell), showing store density
+- **Fixed radius** — all dots same size for clean visuals
+- **Pickable** — hover shows H3 cell ID and brand location count
 
-The double normalisation squashed score spread: rural cells anchored the
-"0" end, compressing all city cells into a narrow band near 1.0.
+### Tooltip system
 
-**Fix:** Removed the first normalisation pass. Raw cosine scores now flow
-to `app.py`, where a single min-max normalisation runs against city cells
-only. This gives the full [0, 1] range to differentiate between city
-locations.
+pydeck uses a single tooltip template for all pickable layers. Each layer's
+DataFrame is populated with all tooltip fields (empty string for inapplicable
+ones). CSS `:has(span:empty)` hides rows with no value, so:
 
----
-
-## POI Density Tiebreaking
-
-When multiple cells have identical opportunity scores (common in cities
-where many areas share similar category mixes), **POI density** (total
-amenity count per cell from `count_vectors`) is used as a secondary sort
-key. Denser areas (busier high streets) rank higher among equally-scored
-cells.
-
-Used in:
-- `similarity.get_top_opportunities()` — secondary sort
-- `map_viz.build_map()` — top 2% green dot selection
-- Map tooltip — displayed as "POI Density: N"
+- **Hexagon hover**: shows address, opp score, similarity, POI count,
+  competitors, POI mix
+- **Brand dot hover**: shows H3 cell ID and brand count only
 
 ---
 
 ## Category Filtering (Two-Stage)
 
-The competitor search needs to know which POI categories to include. Raw
-brand POI data can contain noise (e.g. a Starbucks distributor hub tagged
-as `b2b_supplier_distributor`).
-
 ### Stage 1: Frequency Gate
 
 Count category occurrences across brand POIs (both `basic_category` and
 `poi_primary_category`). Drop any category appearing in fewer than 5% of
-POIs. This removes low-frequency noise from false-positive vector search
-matches.
+POIs.
 
 ### Stage 2: LLM Industry Filter
 
-Pass the brand name, the **top 3 dominant categories** (by count), and all
-above-threshold categories to an LLM. The prompt asks it to keep only
-categories that represent a **competitor in the same industry vertical**,
-with concrete examples:
-
-> *If the brand is a cafe, competitors are cafes, coffee shops, bakeries —
-> NOT hair salons, gyms, or distributors.*
-
-This is flexible across retail verticals — works for coffee chains, gyms,
-pharmacies, etc. without hardcoded rules.
+Pass the brand name, top 3 dominant categories, and all above-threshold
+categories to an LLM. The prompt asks it to keep only categories representing
+a **competitor in the same industry vertical**.
 
 **Fallback:** if the LLM call fails, use the top 3 dominant categories.
 
@@ -258,24 +284,17 @@ pharmacies, etc. without hardcoded rules.
 
 ## Authentication
 
-The Databricks SDK's `databricks-cli` OAuth auth causes `SIGSEGV` crashes
-when run inside Streamlit's multi-threaded environment (the Go-compiled CLI
-binary segfaults in a subprocess).
-
-**Solution:** conditional auth in both `brand_search._get_workspace_client()`
-and `db._create_connection()`:
+Conditional auth in both `brand_search._get_workspace_client()` and
+`db._create_connection()`:
 
 ```python
 if os.environ.get("DATABRICKS_RUNTIME_VERSION") or os.environ.get("IS_DATABRICKS_APP"):
     # On Databricks: service principal (default)
-    cfg = Config()
+    client = WorkspaceClient()
 else:
     # Local Streamlit: PAT from [DEFAULT] profile
-    cfg = Config(profile="DEFAULT")
+    client = WorkspaceClient(profile="DEFAULT")
 ```
-
-This ensures portability: works locally with PAT and deploys to Databricks
-Apps with service principal auth.
 
 ---
 
@@ -283,85 +302,66 @@ Apps with service principal auth.
 
 | File | Status | What changed |
 |:---|:---:|:---|
-| `brand_search.py` | **NEW** | `search_pois()`, `discover_brand_locations()`, `_detect_category_intent()` (LLM pre-filter), `_refine_brand_pois()` (brand name + dominant category cleanup), `find_competitors_in_similar_cells()`, `_filter_categories()` (frequency + LLM), `_llm_industry_filter()` (hotel example added), `h3_int_to_hex()`, `_get_workspace_client()` |
-| `similarity.py` | MODIFIED | Removed first-pass min-max normalisation (raw cosine scores flow through); `compute_opportunity_score()` merges on `h3_hex`; `get_top_opportunities()` sorts by `[opportunity_score, poi_density]` |
-| `app.py` | MODIFIED | Brand name input mode, country/city defaults (GB/London), adjustable thresholds (brand=0.45, competitor=0.45), β slider (default 1.0), competition pipeline, POI density merge from `count_vectors`, brand search debug expander, removed red competitor blob |
-| `map_viz.py` | MODIFIED | `_h3_int_to_hex` handles signed BIGINTs, heatmap coloured by similarity, green dots = top 2% by opp score + density tiebreak, tooltip shows opp score + similarity + POI density + competitor count + top 3 names + POI mix, blue/green dots non-pickable for tooltip pass-through |
-| `explainability.py` | MODIFIED | `explain_competition()` for detail panel |
-| `config.py` | MODIFIED | `VS_INDEX_NAME`, `ENRICHED_TABLE`, `VS_COLUMNS`, `BRAND_THRESHOLD=0.45`, `COMPETITOR_THRESHOLD=0.45` |
-| `db.py` | MODIFIED | `_create_connection()` uses conditional `Config(profile="DEFAULT")` for local dev |
-| `.env` | MODIFIED | `DATABRICKS_WAREHOUSE_ID`, `GOLD_CATALOG=beatrice_liew`, `GOLD_SCHEMA=geospatial` |
-| `embeddings.py` | — | No changes (SRAI captures density via POI row count per cell) |
-| `pipeline.py` | — | No changes (`build_count_vectors` now used for density tiebreak) |
+| `brand_search.py` | **REWRITTEN** | Replaced Vector Search with Genie (`_ask_genie`, `_ensure_genie_space`). h3_polyfillash3 for inference query. Direct SQL for competition (no city polygon — uses specific h3_list). `infer_location_categories()` for lat/lon input. LLM category filter retained. |
+| `setup_genie_space.py` | **NEW** | Auto-create/update Genie Space with h3_polyfillash3 instructions, example SQL, sample questions. Persist space ID to app_config table. Runs as DABs task or standalone. |
+| `gold_places_enriched.sql` | **NEW** | CTAS flattening raw CARTO place data into comprehensive POI table for Genie and competition queries. |
+| `config.py` | MODIFIED | Added `GOLD_PLACES_ENRICHED`, `APP_CONFIG_TABLE`, `GENIE_SPACE_ID` (resolved from env/table). Removed `VS_INDEX_NAME`, `ENRICHED_TABLE`, `VS_COLUMNS`, `BRAND_THRESHOLD`, `COMPETITOR_THRESHOLD`. |
+| `pipeline.py` | MODIFIED | `get_enriched_pois_in_city()` uses h3_polyfillash3 CTE instead of ST_CONTAINS JOIN. Removed `has_polygon` filter. |
+| `map_viz.py` | MODIFIED | Brand dots snapped to H3 cell centres with density colour gradient (light→dark blue). Fixed radius. Pickable with brand count tooltip. Contextual tooltip via CSS `:has(span:empty)` hiding. |
+| `app.py` | MODIFIED | Removed brand/competitor threshold sliders. Competition runs for all input modes. Uses `infer_location_categories` for lat/lon. |
+| `app.yaml` | MODIFIED | Added `GENIE_SPACE_ID` env var. |
+| `geospatial_etl_job.yml` | MODIFIED | Added `create_gold_places_enriched` SQL task and `setup_genie_space` Python task. |
+| `.env` | MODIFIED | Added `GENIE_SPACE_ID`. |
+| `similarity.py` | — | No changes |
+| `embeddings.py` | — | No changes |
 
 ---
 
 ## Key Decisions & Trade-offs
 
-1. **Data-driven competitor identification** (not pure vector search).
-   Initial approach used vector search to find competitors directly, but
-   results were saturated with the brand itself. Current approach: use
-   Hex2Vec to find similar *areas*, then query the enriched POI table for
-   businesses in those areas matching the brand's categories.
+1. **Genie over Vector Search.** Genie generates precise SQL from natural
+   language, leveraging the full schema of `gold_places_enriched`. This
+   eliminates the need for a separate Vector Search index and gives more
+   control over spatial filtering via instructions.
 
-2. **LLM for category filtering, not competitor naming.** The LLM doesn't
-   guess competitor brand names — it only decides which POI *categories*
-   belong to the same industry vertical. This is more reliable and
-   data-grounded.
+2. **h3_polyfillash3 over ST_CONTAINS.** Converting city polygons to H3 cells
+   once and filtering by integer membership is orders of magnitude faster than
+   per-row geometry checks. Accepts WKT strings directly (not GEOMETRY).
 
-3. **LLM intent detection as VS pre-filter.** Vector Search on
-   concatenated text fields is noisy (e.g. "budget hotels" returns "Budget
-   Car Rental"). The LLM identifies the target category and adds it as a
-   metadata filter on the VS call, scoping results to the right business
-   type while keeping free-text flexibility.
+3. **Genie SQL re-execution.** Genie's SDK data retrieval has known truncation
+   issues. The app extracts Genie's generated SQL and executes it directly via
+   DBSQL for complete, reliable results.
 
-4. **Brand POI refinement post-VS.** Even with intent filtering, shared
-   brand names cause noise (e.g. "Premier" convenience stores for "Premier
-   Inn"). A two-stage post-filter uses brand_name_primary matching then
-   dominant-category filtering to clean up results.
+4. **Auto-provisioned Genie Space.** The GENIE_SPACE_ID is optional — if not
+   set, the app finds an existing space by name or creates one. This makes
+   the app self-contained for end users while allowing pre-provisioning via
+   the ETL job.
 
-5. **Hex string merge** instead of integer merge. Avoids the signed/unsigned
-   BIGINT mismatch between Databricks SQL and h3-py without changing the
-   existing pipeline's integer-based data flow.
+5. **No has_polygon filter.** All `gold_cities` rows have valid WKT (either
+   real polygons from `division_area` or synthetic bbox fallbacks).
+   `h3_polyfillash3` works with both, so the filter is unnecessary and was
+   causing London (which has `has_polygon = FALSE`) to return 0 results.
 
-6. **Frequency gate before LLM.** Reduces the number of categories the LLM
-   sees, making it less likely to keep irrelevant ones, and provides a
-   sensible fallback if the LLM is unavailable.
+6. **H3 as hex strings.** Genie returns `h3_h3tostring(h3_longlatash3(...))`
+   hex strings, matching the rest of the codebase's merge-on-hex pattern.
 
-7. **Single-pass normalisation.** Removed the first min-max normalisation
-   in `compute_similarity()` to avoid squashing score spread. City-only
-   normalisation in `app.py` gives the full [0, 1] range for meaningful
-   differentiation.
+7. **Brand dots snapped to H3 centres.** Raw POI coordinates appeared
+   misaligned from the hexagon grid. Snapping to cell centres and adding a
+   density colour gradient (light→dark) provides cleaner visualisation.
 
-8. **POI density as tiebreaker.** Among cells with identical opportunity
-   scores, denser areas (more amenities) rank higher. Uses existing
-   `count_vectors` data — no additional computation needed.
+8. **Competition for all input modes.** For lat/lon and address inputs,
+   `infer_location_categories()` reverse-looks up nearby POIs to determine
+   relevant categories, enabling competition analysis without a brand name.
 
 ---
 
-## Open Issues
-
-- [x] ~~Verify competitor counts appear correctly on map tooltips~~
-- [x] ~~Fix double normalisation squashing score spread~~
-- [x] ~~Fix "Premier" convenience stores appearing for "Premier Inn"~~
-- [x] ~~Remove orange debug layer and red competitor blob~~
-- [ ] Validate category filter quality across different brand types
-  (coffee, pharmacy, gym, hotel, etc.)
-- [ ] Consider tuning the top N% cutoff (currently 2%) or making it
-  a slider
-- [ ] Remove debug expanders before final demo
-- [ ] Test with non-UK data when enriched table is expanded
-
----
-
-## Future Enhancements (not in v1)
+## Future Enhancements
 
 1. **Semantic cell embedding** — average POI text embeddings per H3 cell
    and fuse with Hex2Vec vibe score for richer affinity matching.
-2. **Expand to non-UK** — extend the enriched table and VS index to cover
-   more Overture data.
-3. **DBSQL brand fallback** — for exact brand name matches, query
-   `site_selection_embedding` directly by `brand_name_primary` instead of
-   relying on Vector Search similarity thresholds.
-4. **Catchment area analysis** — k-ring scoring around candidate sites for
+2. **Expand to non-UK** — the enriched table already covers global CARTO
+   data; validate with non-UK cities.
+3. **Catchment area analysis** — k-ring scoring around candidate sites for
    complementary POIs and foot traffic proxies.
+4. **Genie conversation follow-ups** — use `create_message_and_wait` to
+   ask refinement questions within an existing Genie conversation.

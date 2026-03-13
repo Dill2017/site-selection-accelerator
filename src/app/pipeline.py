@@ -12,7 +12,7 @@ from __future__ import annotations
 import h3 as _h3
 import pandas as pd
 
-from config import GOLD_CITIES_TABLE, GOLD_PLACES_TABLE
+from config import GOLD_CITIES_TABLE, GOLD_PLACES_ENRICHED, GOLD_PLACES_TABLE
 from db import execute_query
 
 
@@ -119,6 +119,44 @@ def get_pois_with_h3(
           AND bbox_xmax <= {bbox['xmax']}
           AND bbox_ymin >= {bbox['ymin']}
           AND bbox_ymax <= {bbox['ymax']}
+    """
+    return execute_query(query)
+
+
+def get_enriched_pois_in_city(
+    country: str,
+    city: str,
+    resolution: int,
+    categories: list[str],
+) -> pd.DataFrame:
+    """Extract POIs from gold_places_enriched using H3 polygon fill.
+
+    Uses h3_polyfillash3 to convert the city polygon into H3 cells,
+    then filters POIs by cell membership.  Much faster than per-row
+    ST_CONTAINS since the spatial check becomes a simple integer IN.
+    Returns the same schema as get_pois_with_h3 for pipeline compatibility.
+    """
+    cat_list = ", ".join(f"'{c}'" for c in categories)
+    query = f"""
+        WITH city_h3 AS (
+            SELECT explode(h3_polyfillash3(
+                geom_wkt, {resolution}
+            )) AS h3_cell
+            FROM {GOLD_CITIES_TABLE}
+            WHERE country = '{country}' AND city_name = '{city}'
+        )
+        SELECT
+            p.poi_id,
+            p.basic_category AS category,
+            p.lon,
+            p.lat,
+            p.address_line AS address,
+            h3_longlatash3(p.lon, p.lat, {resolution}) AS h3_cell
+        FROM {GOLD_PLACES_ENRICHED} p
+        WHERE h3_longlatash3(p.lon, p.lat, {resolution})
+              IN (SELECT h3_cell FROM city_h3)
+          AND p.basic_category IN ({cat_list})
+          AND p.lon IS NOT NULL AND p.lat IS NOT NULL
     """
     return execute_query(query)
 

@@ -3,11 +3,11 @@
 A Databricks solution accelerator that helps retail operations teams identify
 **whitespace expansion opportunities** for their brand. Users can search by
 **brand name** (e.g. "Starbucks", "Premier Inn") or enter coordinates directly.
-The app discovers existing locations via **Databricks Vector Search** on enriched
-POI text features, builds a geospatial profile using **Hex2Vec** embeddings,
-scores every H3 hexagonal cell in the target city by neighbourhood similarity,
-and applies a **competition penalty** based on co-located competitors — surfacing
-the areas that best match the brand's surroundings but aren't yet saturated.
+The app discovers existing locations via **Databricks Genie** (natural language
+to SQL), builds a geospatial profile using **Hex2Vec** embeddings, scores every
+H3 hexagonal cell in the target city by neighbourhood similarity, and applies a
+**competition penalty** based on co-located competitors — surfacing the areas
+that best match the brand's surroundings but aren't yet saturated.
 
 Brand locations can be in **any city** — the tool learns what kind of
 neighbourhoods a brand thrives in and finds similar areas in the target market,
@@ -34,20 +34,21 @@ enabling cross-city expansion analysis.
 │         └────────┬────────┴─────────────────┴───────────────┘        │
 │                  ▼                                                    │
 │  ┌──────────────────────────────────────────────────────────────┐    │
-│  │       Brand Discovery (brand_search.py)  [NEW]               │    │
+│  │        Brand Discovery (brand_search.py)                     │    │
 │  │                                                              │    │
-│  │  1. LLM intent detection → category pre-filter              │    │
-│  │  2. Databricks Vector Search on text-feature embeddings      │    │
-│  │  3. Brand POI refinement (name match + dominant category)    │    │
-│  │  → brand locations (lat/lon + H3 cells)                      │    │
+│  │  1. Databricks Genie: NL → SQL on gold_places_enriched      │    │
+│  │     (auto-provisions Genie Space if ID not set)              │    │
+│  │  2. h3_polyfillash3 city polygon → H3 cell filter            │    │
+│  │  3. Brand matching via ILIKE on brand_name / poi_name        │    │
+│  │  → brand locations (lat/lon + H3 hex cells)                  │    │
 │  └──────────────────────────┬───────────────────────────────────┘    │
 │                             ▼                                        │
 │  ┌──────────────────────────────────────────────────────────────┐    │
 │  │         DBSQL Queries on Gold Tables (pipeline.py)           │    │
 │  │                                                              │    │
 │  │  1. City polygon from gold_cities    (pre-computed WKT)      │    │
-│  │  2. H3 tessellation                  (h3_polyfillash3)       │    │
-│  │  3. POI lookup from gold_places      (pre-flattened coords)  │    │
+│  │  2. H3 tessellation via h3_polyfillash3 (fast polygon fill)  │    │
+│  │  3. POI lookup from gold_places_enriched (flattened CARTO)   │    │
 │  │  4. Cross-city brand neighbourhood   (for external brands)   │    │
 │  └──────────────────────────┬───────────────────────────────────┘    │
 │                             ▼                                        │
@@ -73,13 +74,13 @@ enabling cross-city expansion analysis.
 │          ▼                  ▼                                        │
 │  ┌────────────────┐  ┌──────────────────────────────────────────┐    │
 │  │ Competition     │  │  Score Explainability (explainability.py)│    │
-│  │ Analysis  [NEW] │  │                                          │    │
+│  │ Analysis        │  │                                          │    │
 │  │ (brand_search)  │  │  • Brand profile (avg POI counts)        │    │
 │  │                 │  │  • Category comparison vs brand average   │    │
 │  │ • Similar cells │  │  • Competition detail panel               │    │
-│  │ • Enriched POI  │  └──────────────────────────┬───────────────┘    │
-│  │   table query   │                             │                   │
-│  │ • Category      │                             │                   │
+│  │ • gold_places   │  └──────────────────────────┬───────────────┘    │
+│  │   _enriched     │                             │                   │
+│  │ • LLM category  │                             │                   │
 │  │   filtering     │                             │                   │
 │  └────────┬────────┘                             │                   │
 │           └──────────────────┬───────────────────┘                   │
@@ -89,33 +90,36 @@ enabling cross-city expansion analysis.
 │  │                                                              │    │
 │  │  • CARTO basemap                                             │    │
 │  │  • H3HexagonLayer — similarity heatmap                       │    │
-│  │  • ScatterplotLayer — existing locations (blue)              │    │
+│  │  • ScatterplotLayer — existing locations (blue, density      │    │
+│  │    gradient: light→dark by brand count per cell)             │    │
 │  │  • ScatterplotLayer — top 2% opportunities (green)           │    │
-│  │  • Tooltips: opp score, similarity, competitors, POI count   │    │
+│  │  • Tooltips: contextual per layer (brand count, opp score,   │    │
+│  │    similarity, competitors, POI mix)                          │    │
 │  └──────────────────────────────────────────────────────────────┘    │
 └───────────────────────────────────────────────────────────────────────┘
                               │
      ┌────────────────────────┼────────────────────────┐
      ▼                        ▼                         ▼
 ┌──────────────────┐ ┌──────────────────┐ ┌──────────────────────┐
-│  Gold Tables      │ │  Enriched POI    │ │  Databricks SQL      │
-│  (Unity Catalog)  │ │  Table + VS      │ │  Warehouse           │
-│                   │ │  Index  [NEW]    │ │                      │
-│  • gold_cities    │ │                  │ │  H3 functions:       │
-│  • gold_places    │ │  • site_sel...   │ │   h3_polyfillash3    │
-│                   │ │    _embedding    │ │   h3_longlatash3     │
-│                   │ │  • site_        │ │   h3_centerasgeojson │
-│                   │ │    embeddings   │ │                      │
-└──────────────────┘ │    (VS index)    │ └──────────────────────┘
-         ▲            └──────────────────┘
-         │
+│  Gold Tables      │ │  Genie Space     │ │  Databricks SQL      │
+│  (Unity Catalog)  │ │  (auto-created)  │ │  Warehouse           │
+│                   │ │                  │ │                      │
+│  • gold_cities    │ │  NL → SQL on:    │ │  H3 functions:       │
+│  • gold_places    │ │  • gold_places   │ │   h3_polyfillash3    │
+│  • gold_places    │ │    _enriched     │ │   h3_longlatash3     │
+│    _enriched      │ │  • gold_cities   │ │   h3_h3tostring      │
+│  • app_config     │ │                  │ │   h3_centerasgeojson │
+└──────────────────┘ └──────────────────┘ └──────────────────────┘
+         ▲
 ┌───────────────────────┐
 │  ETL Job               │
-│  (SQL tasks on DBSQL)  │
+│  (SQL + Python tasks)  │
 │                        │
 │  CARTO Overture Maps   │
 │  → gold_cities         │
 │  → gold_places         │
+│  → gold_places_enriched│
+│  → Genie Space setup   │
 └───────────────────────┘
 ```
 
@@ -172,6 +176,8 @@ env:
     value: "dilshad_shawki"     # Must match catalog above
   - name: GOLD_SCHEMA
     value: "geospatial"         # Must match schema above
+  - name: GENIE_SPACE_ID
+    value: ""                   # Optional — auto-created if empty
 ```
 
 ### 4. Deploy with Asset Bundles
@@ -186,9 +192,8 @@ databricks bundle deploy
 
 ### 5. Run the ETL job to populate gold tables
 
-This creates the `gold_cities` and `gold_places` tables in your catalog/schema
-by pre-processing the raw CARTO Overture Maps data. It runs as SQL tasks on
-your SQL Warehouse and typically completes in under a minute.
+This creates `gold_cities`, `gold_places`, and `gold_places_enriched` tables
+in your catalog/schema, then provisions a Genie Space with spatial instructions.
 
 ```bash
 databricks bundle run geospatial_etl_job
@@ -209,25 +214,27 @@ Open it in your browser to start finding whitespace opportunities.
 
 ### Step 1 — Gold Table ETL (one-time setup)
 
-A Databricks job with SQL tasks pre-processes the raw CARTO Overture Maps data
-into two gold tables optimised for the app:
+A Databricks job with SQL and Python tasks pre-processes the raw CARTO
+Overture Maps data into gold tables and provisions the Genie Space:
 
 | Gold Table | Source | What it does |
 |---|---|---|
 | `gold_cities` | `division` + `division_area` | Joins city metadata with polygons, extracts WKT geometry, computes bounding boxes, generates fallback rectangular polygons for cities without geometry |
 | `gold_places` | `place` | Extracts lon/lat from WKB geometry, flattens `categories.primary` and `addresses[0].freeform`, filters to supported POI categories |
+| `gold_places_enriched` | `place` | Comprehensive POI table with flattened names, categories, brands, addresses, coordinates, and bounding boxes for Genie and competition queries |
+| `app_config` | — | Key-value store for `GENIE_SPACE_ID` and other runtime config |
 
-This eliminates all JSON/array unnesting and WKB→geometry conversion at query
-time, making the app significantly faster.
+The ETL job also runs `setup_genie_space.py`, which creates (or updates) a
+Genie Space configured with `h3_polyfillash3`-based spatial instructions and
+example SQL, then persists the space ID to `app_config`.
 
 ### Step 2 — User Input
 
 The Streamlit sidebar collects:
 
-- **Brand name** (e.g. "Starbucks", "Premier Inn") — discovered via Vector
-  Search on enriched POI text features. An LLM detects the target business
-  category to pre-filter results, followed by brand name matching and dominant
-  category refinement to clean up false positives.
+- **Brand name** (e.g. "Starbucks", "Premier Inn") — discovered via Genie.
+  The Genie Space uses `h3_polyfillash3` to fill the city polygon with H3
+  cells and filters POIs by cell membership for fast spatial queries.
 - **Or brand locations**: `lat, lon` pairs or street addresses (geocoded via
   Nominatim/geopy). These can be in **any city** — not just the target city.
 - **H3 resolution** (7–10): controls hexagon granularity.
@@ -235,12 +242,21 @@ The Streamlit sidebar collects:
   (defaults to GB / London).
 - **POI categories**: multi-select grouped by theme (Food & Drink, Shopping,
   Services, Entertainment, Commercial).
-- **Brand / competitor match thresholds**: minimum Vector Search similarity
-  score (default 0.45).
 - **Competition sensitivity (beta)**: slider from 0 to 1 controlling how
   heavily competition penalises the opportunity score.
 
-### Step 3 — Cross-City Brand Profiling (`pipeline.py`)
+### Step 3 — Brand Discovery via Genie (`brand_search.py`)
+
+1. The app sends a natural language question to the Genie Space (e.g. "Find
+   all Starbucks within London, GB using h3_polyfillash3").
+2. Genie generates optimised SQL following the configured instructions —
+   using `h3_polyfillash3` to convert the city polygon into H3 cells,
+   then filtering POIs by H3 cell membership (no expensive ST_CONTAINS).
+3. The generated SQL is executed via DBSQL for full, reliable results.
+4. H3 cells are returned as hex strings via `h3_h3tostring`.
+5. If `GENIE_SPACE_ID` is not set, the app auto-provisions one on first use.
+
+### Step 4 — Cross-City Brand Profiling (`pipeline.py`)
 
 When brand locations are outside the target city:
 
@@ -251,7 +267,7 @@ When brand locations are outside the target city:
    cells in the same embedding space.
 5. After scoring, only target city cells are shown as opportunities.
 
-### Step 4 — SRAI Hex2Vec Embeddings (`embeddings.py`)
+### Step 5 — SRAI Hex2Vec Embeddings (`embeddings.py`)
 
 Using the [SRAI](https://kraina-ai.github.io/srai/) library:
 
@@ -266,26 +282,24 @@ Using the [SRAI](https://kraina-ai.github.io/srai/) library:
 > **Deep dive:** See [HEX2VEC_EXPLAINER.md](HEX2VEC_EXPLAINER.md) for a
 > full explanation of how Hex2Vec works.
 
-### Step 5 — Cosine Similarity & Opportunity Scoring (`similarity.py`)
+### Step 6 — Cosine Similarity & Opportunity Scoring (`similarity.py`)
 
 1. Maps each brand location to its H3 cell at the chosen resolution.
 2. Averages those cell embeddings to form a **brand profile vector**.
 3. Computes cosine similarity between the brand profile and every target city
    cell's embedding.
-4. Re-normalises scores to [0, 1] within the target city for colour contrast
-   (single-pass normalisation).
+4. Re-normalises scores to [0, 1] within the target city for colour contrast.
 5. Excludes cells where the brand already has a location.
-6. **Competition analysis** (when using brand name search): queries the
-   enriched POI table for businesses in high-similarity cells matching the
-   brand's categories. Categories are filtered via a frequency gate and LLM
-   industry filter to remove noise (e.g. distributors, B2B suppliers).
+6. **Competition analysis** (all input modes): queries `gold_places_enriched`
+   for businesses in high-similarity cells matching the brand's categories.
+   Categories are filtered via a frequency gate and LLM industry filter.
+   For lat/lon input, categories are inferred from nearby POIs.
 7. Computes **opportunity score**:
    `opportunity = similarity × (1 − β × competition_score)` where
    `competition_score = competitor_count / max(competitor_count)`.
-8. Ranks cells by opportunity score, using **POI density** as a tiebreaker
-   for equally-scored cells.
+8. Ranks cells by opportunity score, using **POI density** as a tiebreaker.
 
-### Step 6 — Map Visualisation (`map_viz.py`)
+### Step 7 — Map Visualisation (`map_viz.py`)
 
 Rendered with [pydeck](https://deckgl.readthedocs.io/) on a CARTO Positron
 basemap:
@@ -293,8 +307,8 @@ basemap:
 | Layer | Description |
 |---|---|
 | **H3HexagonLayer** | All candidate cells coloured by similarity score (red = high, blue = low) |
-| **ScatterplotLayer (blue)** | Existing brand locations (non-pickable for tooltip pass-through) |
-| **ScatterplotLayer (green)** | Top 2% opportunity locations by opportunity score + POI density (non-pickable) |
+| **ScatterplotLayer (blue)** | Existing brand locations snapped to H3 cell centres; colour gradient from light blue (1 location) to dark navy (max locations per cell). Pickable with brand count tooltip. |
+| **ScatterplotLayer (green)** | Top 2% opportunity locations by opportunity score + POI density |
 
 Hovering over any H3 cell shows a tooltip with:
 - H3 cell ID and nearest address
@@ -303,21 +317,23 @@ Hovering over any H3 cell shows a tooltip with:
 - Competitor count and top 3 competitor names (ranked by popularity)
 - Category breakdown comparing the cell's POI mix against the brand average
 
-### Step 7 — Score Explainability (`explainability.py`)
+Hovering over a brand location dot shows:
+- H3 cell ID
+- Number of brand locations in that cell
+
+### Step 8 — Score Explainability (`explainability.py`)
 
 Rather than showing only a similarity percentage, the app provides interpretable
 explanations using the raw POI count vectors:
 
 - **Brand Location Profile** — displayed before the map as a horizontal bar
   chart of average POI counts per category across all brand cells, colour-coded
-  by category group (Food & Drink, Shopping, etc.). An expandable heatmap shows
-  the per-location breakdown so users can see variance across their stores.
+  by category group (Food & Drink, Shopping, etc.).
 - **Enhanced tooltips** — hovering any hexagon on the map shows the top 4
-  categories in that cell compared to the brand average (e.g. "Restaurant: 4 / 3.2").
+  categories in that cell compared to the brand average.
 - **Row-select detail panel** — clicking any row in the Top 20 table reveals a
   side-by-side grouped bar chart comparing that opportunity's category counts
-  (green) against the brand average (blue), along with a text summary of which
-  category groups are above or below average.
+  against the brand average.
 
 ---
 
@@ -328,42 +344,46 @@ site_selection_accelerator/
 ├── databricks.yml                    # Asset Bundle config (catalog, schema, warehouse)
 ├── README.md                         # This file
 ├── HEX2VEC_EXPLAINER.md             # Deep dive into the Hex2Vec algorithm
-├── INTEGRATION_PLAN.md              # Detailed technical notes for competitive analysis
+├── INTEGRATION_PLAN.md              # Detailed technical notes
 ├── resources/
 │   ├── site_selection_app.yml        # Databricks App resource definition
-│   └── geospatial_etl_job.yml        # ETL job: SQL tasks to build gold tables
+│   └── geospatial_etl_job.yml        # ETL job: SQL + Python tasks
 └── src/
     ├── app/
     │   ├── app.yaml                  # App runtime config (command, env vars)
     │   ├── requirements.txt          # Python dependencies
     │   ├── .env                      # Local dev env vars (not committed)
     │   ├── app.py                    # Streamlit UI + orchestration
-    │   ├── config.py                 # Gold table refs, categories, VS index, thresholds
+    │   ├── config.py                 # Gold table refs, categories, Genie Space ID
     │   ├── db.py                     # DBSQL connection (cached, auto-reconnect, PAT/SP)
     │   ├── pipeline.py               # DBSQL queries on gold tables + cross-city logic
     │   ├── embeddings.py             # SRAI Hex2Vec embedding pipeline
     │   ├── similarity.py             # Cosine similarity + opportunity scoring
-    │   ├── brand_search.py           # Brand discovery (VS) + competition analysis
+    │   ├── brand_search.py           # Brand discovery (Genie) + competition analysis
     │   ├── explainability.py         # Score explainability + competition detail
     │   └── map_viz.py                # pydeck map construction (similarity heatmap)
     └── pipeline/
+        ├── setup_genie_space.py      # Genie Space provisioning (create/update/persist)
         └── transformations/
             ├── setup_schema.sql      # CREATE SCHEMA IF NOT EXISTS
             ├── gold_cities.sql       # CTAS: flattened cities + polygons + bboxes
-            └── gold_places.sql       # CTAS: flattened POIs with extracted coords
+            ├── gold_places.sql       # CTAS: flattened POIs with extracted coords
+            └── gold_places_enriched.sql  # CTAS: comprehensive POI table for Genie
 ```
 
 ---
 
 ## Key Libraries and Functions
 
-### Databricks SQL Geospatial Functions
+### Databricks SQL Geospatial & H3 Functions
 
 | Function | Purpose |
 |---|---|
-| `h3_polyfillash3(geog, res)` | Tessellate a polygon into H3 cells |
+| `h3_polyfillash3(wkt, res)` | Tessellate a polygon (WKT string) into H3 cells |
 | `h3_longlatash3(lon, lat, res)` | Assign a point to its H3 cell |
+| `h3_h3tostring(cell)` | Convert H3 BIGINT to hex string |
 | `h3_centerasgeojson(cell)` | Get the centre point of an H3 cell |
+| `ST_GeomFromText(wkt)` | Parse WKT into geometry (used in gold_cities ETL) |
 
 ### Python Libraries
 
@@ -377,34 +397,8 @@ site_selection_accelerator/
 | `pydeck` | Deck.gl map rendering in Streamlit |
 | `geopy` | Optional address geocoding via Nominatim |
 | `databricks-sql-connector` | DBSQL query execution |
-| `databricks-sdk` | Workspace authentication, Vector Search client, Foundation Model API |
+| `databricks-sdk` | Workspace auth, Genie API, Foundation Model API |
 | `python-dotenv` | Load `.env` variables for local development |
-
----
-
-## POI Categories (Overture Maps)
-
-This accelerator uses the
-[Overture Maps](https://overturemaps.org/) `categories.primary` taxonomy
-rather than raw OSM `key=value` tags. The Overture categories are derived
-from OpenStreetMap (among other sources) and provide a cleaner, normalised
-classification. The mapping is roughly:
-
-| OSM Tag | Overture Category |
-|---|---|
-| `amenity=restaurant` | `restaurant` |
-| `amenity=fast_food` | `fast_food_restaurant` |
-| `amenity=cafe` | `cafe`, `coffee_shop` |
-| `amenity=bar` / `pub` | `bar` |
-| `amenity=bank` | `bank` |
-| `amenity=pharmacy` | `pharmacy` |
-| `amenity=fuel` | `gas_station` |
-| `shop=supermarket` | `grocery_store`, `supermarket` |
-| `shop=clothes` | `clothing_store` |
-| `shop=convenience` | `convenience_store` |
-
-To add custom categories, edit the `CATEGORY_GROUPS` dictionary in
-`src/app/config.py` and re-run the ETL job to include them in the gold table.
 
 ---
 
@@ -414,20 +408,17 @@ To add custom categories, edit the `CATEGORY_GROUPS` dictionary in
   `src/app/app.yaml` env vars (`GOLD_CATALOG`, `GOLD_SCHEMA`), then re-run
   the ETL job.
 - **Add new POI categories** — edit `CATEGORY_GROUPS` in `config.py` and the
-  `WHERE` clause in `src/pipeline/transformations/gold_places.sql`, then re-run
-  the ETL job.
+  `WHERE` clause in `gold_places.sql`, then re-run the ETL job.
 - **Refresh gold tables** — run `databricks bundle run geospatial_etl_job`
-  whenever the upstream CARTO data updates. Add a cron schedule to the job
-  resource for automatic refreshes.
+  whenever the upstream CARTO data updates. This also updates the Genie Space
+  instructions.
+- **Custom Genie instructions** — edit `setup_genie_space.py` to add
+  domain-specific instructions or example question-SQL pairs.
 - **Scale Hex2Vec training** — for large regions, offload training to a
-  Databricks Job / notebook with GPU cluster. Save the model with
-  `embedder.save()` and load it in the app with `Hex2VecEmbedder.load()`.
+  Databricks Job / notebook with GPU cluster.
 - **Alternative embedders** — swap `Hex2VecEmbedder` for SRAI's
   `CountEmbedder` (no training needed, faster) or
   `ContextualCountEmbedder` (neighbourhood-aware counts).
-- **Brand detection** — now implemented via Vector Search on enriched POI
-  text features. See `brand_search.py` for the full pipeline including LLM
-  intent detection, brand POI refinement, and competition analysis.
 
 ---
 
@@ -436,8 +427,9 @@ To add custom categories, edit the `CATEGORY_GROUPS` dictionary in
 | Issue | Resolution |
 |---|---|
 | "None of the brand locations fall within the analysed H3 cells" | Brand-neighbourhood POI data may be too sparse. Try selecting more POI categories or a coarser H3 resolution. |
-| "No POIs found" | The bounding box or category filter may be too restrictive. Broaden the category selection. |
+| "No POIs found" | The category filter may be too restrictive. Broaden the category selection. |
 | Gold tables don't exist | Run the ETL job first: `databricks bundle run geospatial_etl_job` |
+| Genie returns empty results | Check that `gold_places_enriched` exists and the Genie Space has correct instructions. Run `setup_genie_space.py` to recreate. |
 | Slow embedding training | Reduce H3 resolution (fewer cells) or reduce `max_epochs` in `embeddings.py`. |
 | SQL warehouse timeout | Increase the timeout on your warehouse or use a larger warehouse size. |
 | App deployment fails | Check the Logs tab in the Databricks Apps UI. Verify `DATABRICKS_WAREHOUSE_ID` and gold table env vars are set. |

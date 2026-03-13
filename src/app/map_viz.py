@@ -89,6 +89,8 @@ def build_map(
     else:
         whitespace["cat_detail"] = ""
 
+    whitespace["brand_count"] = ""
+
     h3_layer = pdk.Layer(
         "H3HexagonLayer",
         data=whitespace,
@@ -101,10 +103,35 @@ def build_map(
         opacity=0.7,
     )
 
-    # ── 2. Brand locations (blue dots) ──────────────────────────────────────
-    brand_df = pd.DataFrame(brand_locations)
-    brand_df["color"] = [[30, 100, 240, 220]] * len(brand_df)
-    brand_df["radius"] = 120
+    # ── 2. Brand locations — snapped to H3 centres, colour by density ──────
+    resolution = h3.get_resolution(
+        _h3_int_to_hex(scored_df["h3_cell"].iloc[0])
+    )
+    cell_counts: dict[str, int] = {}
+    for loc in brand_locations:
+        hex_id = h3.latlng_to_cell(loc["lat"], loc["lon"], resolution)
+        cell_counts[hex_id] = cell_counts.get(hex_id, 0) + 1
+
+    max_count = max(cell_counts.values()) if cell_counts else 1
+    brand_rows: list[dict] = []
+    for hex_id, count in cell_counts.items():
+        clat, clon = h3.cell_to_latlng(hex_id)
+        t = (count - 1) / max(max_count - 1, 1)
+        lightness = int(255 - t * 200)
+        brand_rows.append({
+            "lat": clat,
+            "lon": clon,
+            "brand_count": count,
+            "hex_id": hex_id,
+            "color": [30, 50, lightness, 220],
+            "radius": 120,
+        })
+    brand_df = pd.DataFrame(brand_rows) if brand_rows else pd.DataFrame(
+        columns=["lat", "lon", "brand_count", "hex_id", "color", "radius"]
+    )
+    for col in ("address", "opp_pct", "sim_pct", "poi_count",
+                "competitor_count", "top_competitors", "cat_detail"):
+        brand_df[col] = ""
 
     brand_layer = pdk.Layer(
         "ScatterplotLayer",
@@ -112,7 +139,7 @@ def build_map(
         get_position=["lon", "lat"],
         get_fill_color="color",
         get_radius="radius",
-        pickable=False,
+        pickable=True,
     )
 
     # ── 3. Top opportunities (green dots) — top 5% by opp score ─────────────
@@ -152,18 +179,30 @@ def build_map(
     )
 
     # ── Tooltip ─────────────────────────────────────────────────────────────
-    tooltip_html = (
-        "<b>H3 Cell:</b> {hex_id}<br/>"
-        "<b>Address:</b> {address}<br/>"
-        "<b>Opportunity Score:</b> {opp_pct}%<br/>"
-        "<b>Similarity:</b> {sim_pct}%<br/>"
-        "<b>POI Count:</b> {poi_count}<br/>"
-    )
-    if has_competition:
-        tooltip_html += (
-            "<b>Competitors:</b> {competitor_count}<br/>"
-            "<b>Top 3 Competitors:</b> {top_competitors}<br/>"
+    # Each row is a <div> that collapses to display:none when value is empty
+    # via the :empty pseudo-selector on an inner <span>.
+    def _row(label: str, field: str, suffix: str = "") -> str:
+        val = f"{{{field}}}{suffix}"
+        return (
+            f'<div class="tt-row" data-field="{field}">'
+            f"<b>{label}:</b> <span>{val}</span></div>"
         )
+
+    tooltip_html = (
+        "<style>"
+        ".tt-row span:empty { display: none; }"
+        ".tt-row:has(span:empty) { display: none; }"
+        "</style>"
+    )
+    tooltip_html += _row("H3 Cell", "hex_id")
+    tooltip_html += _row("Brand Locations", "brand_count")
+    tooltip_html += _row("Address", "address")
+    tooltip_html += _row("Opportunity Score", "opp_pct", "%")
+    tooltip_html += _row("Similarity", "sim_pct", "%")
+    tooltip_html += _row("POI Count", "poi_count")
+    if has_competition:
+        tooltip_html += _row("Competitors", "competitor_count")
+        tooltip_html += _row("Top 3 Competitors", "top_competitors")
     tooltip_html += (
         "<hr style='margin:4px 0;border-color:#555'/>"
         "<b>POI Mix</b> (this cell / brand avg):<br/>"
