@@ -22,3 +22,32 @@ resources:
             warehouse_id: ${var.warehouse_id}
             file:
               path: ../src/pipeline/transformations/gold_places.sql
+        - task_key: "create_gold_places_enriched"
+          depends_on:
+            - task_key: "setup_schema"
+          sql_task:
+            warehouse_id: ${var.warehouse_id}
+            file:
+              path: ../src/pipeline/transformations/gold_places_enriched.sql
+        - task_key: "setup_genie_space"
+          depends_on:
+            - task_key: "create_gold_places_enriched"
+            - task_key: "create_gold_cities"
+          spark_python_task:
+            python_file: ../src/pipeline/setup_genie_space.py
+            parameters:
+              - "${var.catalog}"
+              - "${var.schema}"
+              - "${var.warehouse_id}"
+          libraries:
+            - pypi:
+                package: "databricks-sdk>=0.65.0"
+          new_cluster:
+            spark_version: "16.4.x-scala2.13"
+            node_type_id: "Standard_DS3_v2"
+            num_workers: 0
+            spark_conf:
+              spark.databricks.cluster.profile: singleNode
+              spark.master: "local[*]"
+            custom_tags:
+              ResourceClass: SingleNode

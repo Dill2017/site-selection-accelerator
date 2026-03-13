@@ -7,6 +7,9 @@ embeddings, and cosine-similarity scoring.
 
 from __future__ import annotations
 
+from dotenv import load_dotenv
+load_dotenv()
+
 import altair as alt
 import h3
 import numpy as np
@@ -14,9 +17,19 @@ import pandas as pd
 import streamlit as st
 from geopy.geocoders import Nominatim
 
+from brand_search import (
+    discover_brand_locations,
+    find_competitors_in_similar_cells,
+    infer_location_categories,
+)
 from config import CATEGORY_GROUPS, DEFAULT_H3_RESOLUTION, H3_RESOLUTIONS
 from embeddings import run_embedding_pipeline
-from explainability import build_brand_profile, explain_opportunity, summarise_explanation
+from explainability import (
+    build_brand_profile,
+    explain_competition,
+    explain_opportunity,
+    summarise_explanation,
+)
 from map_viz import build_map
 from pipeline import (
     build_count_vectors,
@@ -27,7 +40,7 @@ from pipeline import (
     get_pois_with_h3,
     tessellate_city,
 )
-from similarity import compute_similarity, get_top_opportunities
+from similarity import compute_opportunity_score, compute_similarity, get_top_opportunities
 
 # ── Page configuration ──────────────────────────────────────────────────────
 
@@ -66,13 +79,17 @@ with st.sidebar:
     def _countries():
         return get_countries()
 
-    country = st.selectbox("Country", options=_countries())
+    _country_list = _countries()
+    _default_country_idx = _country_list.index("GB") if "GB" in _country_list else 0
+    country = st.selectbox("Country", options=_country_list, index=_default_country_idx)
 
     @st.cache_data(show_spinner="Loading cities…")
     def _cities(c: str):
         return get_cities(c)
 
-    city = st.selectbox("City", options=_cities(country) if country else [])
+    _city_list = _cities(country) if country else []
+    _default_city_idx = _city_list.index("London") if "London" in _city_list else 0
+    city = st.selectbox("City", options=_city_list, index=_default_city_idx)
 
     # -- POI Category multi-select -------------------------------------------
     st.subheader("POI Categories")
@@ -92,20 +109,44 @@ with st.sidebar:
     st.subheader("Your Brand Locations")
     input_mode = st.radio(
         "Input mode",
-        ["Latitude / Longitude", "Addresses"],
+        ["Brand Name", "Latitude / Longitude", "Addresses"],
         horizontal=True,
     )
 
-    locations_text = st.text_area(
-        "Enter one location per line"
-        + (" (lat, lon)" if input_mode == "Latitude / Longitude" else " (full address)"),
-        height=150,
-        placeholder=(
-            "51.5074, -0.1278\n51.5194, -0.1270"
-            if input_mode == "Latitude / Longitude"
-            else "10 Downing Street, London\n221B Baker Street, London"
-        ),
-    )
+    brand_query: str | None = None
+    locations_text: str = ""
+
+    if input_mode == "Brand Name":
+        brand_query = st.text_input(
+            "Brand or business type",
+            placeholder="Starbucks, premium coffee chain, etc.",
+        )
+    else:
+        locations_text = st.text_area(
+            "Enter one location per line"
+            + (" (lat, lon)" if input_mode == "Latitude / Longitude" else " (full address)"),
+            height=150,
+            placeholder=(
+                "51.5074, -0.1278\n51.5194, -0.1270"
+                if input_mode == "Latitude / Longitude"
+                else "10 Downing Street, London\n221B Baker Street, London"
+            ),
+        )
+
+    # -- Competition analysis -----------------------------------------------
+    st.subheader("Competition Analysis")
+    enable_competition = st.checkbox("Enable competition penalty", value=True)
+    if enable_competition:
+        beta = st.slider(
+            "Competition sensitivity (β)",
+            min_value=0.0,
+            max_value=1.0,
+            value=1.0,
+            step=0.1,
+            help="0 = ignore competition, 1 = heavily penalise saturated areas",
+        )
+    else:
+        beta = 0.0
 
     run_button = st.button("🔍 Find Opportunities", type="primary", use_container_width=True)
 
@@ -154,14 +195,55 @@ if run_button:
     if not selected_cats:
         st.error("Please select at least one POI category.")
         st.stop()
-    if not locations_text.strip():
+
+    if input_mode == "Brand Name":
+        if not brand_query or not brand_query.strip():
+            st.error("Please enter a brand name or business type.")
+            st.stop()
+    elif not locations_text.strip():
         st.error("Please enter at least one brand location.")
         st.stop()
 
-    brand_locations = _parse_locations(locations_text, input_mode)
-    if not brand_locations:
-        st.error("No valid brand locations were parsed. Please check your input.")
-        st.stop()
+    # -- Resolve brand locations -------------------------------------------
+    brand_pois_df = None
+    if input_mode == "Brand Name":
+        with st.spinner(f"Searching for '{brand_query}' locations via Genie…"):
+            brand_locations, _, brand_pois_df = discover_brand_locations(
+                brand_query, resolution, country=country, city=city,
+            )
+
+        if not brand_locations:
+            st.warning(
+                f"No locations found for '{brand_query}' in {city}, {country}. "
+                "Try a different brand name or check that the Genie Space is configured."
+            )
+            st.stop()
+        st.info(f"Found {len(brand_locations)} '{brand_query}' location(s) in {city}, {country}")
+
+        with st.expander("🔍 Brand Search Debug", expanded=False):
+            if brand_pois_df is not None and not brand_pois_df.empty:
+                st.caption(f"**Genie results** ({len(brand_pois_df)} rows)")
+                st.dataframe(brand_pois_df, use_container_width=True)
+
+        if brand_pois_df is not None and not brand_pois_df.empty:
+            cats = brand_pois_df.get("basic_category", pd.Series()).dropna().unique()[:5]
+            if len(cats) > 0:
+                st.caption(f"Brand categories: **{', '.join(cats)}**")
+    else:
+        brand_locations = _parse_locations(locations_text, input_mode)
+        if not brand_locations:
+            st.error("No valid brand locations were parsed. Please check your input.")
+            st.stop()
+
+        if enable_competition and beta > 0:
+            with st.spinner("Inferring brand categories from nearby POIs…"):
+                brand_pois_df = infer_location_categories(
+                    brand_locations, resolution, country, city,
+                )
+            if brand_pois_df is not None and not brand_pois_df.empty:
+                cats = brand_pois_df.get("basic_category", pd.Series()).dropna().unique()[:5]
+                if len(cats) > 0:
+                    st.caption(f"Inferred categories: **{', '.join(cats)}**")
 
     # -- Pipeline execution --------------------------------------------------
     progress = st.progress(0, text="Tessellating city with H3…")
@@ -239,6 +321,72 @@ if run_button:
     else:
         scored["similarity"] = np.zeros(len(scored))
 
+    # -- Competition analysis (all input modes) ──────────────────────────────
+    competitor_pois = None
+    if enable_competition and beta > 0 and brand_pois_df is not None and not brand_pois_df.empty:
+        progress.progress(85, text="Finding competitors in similar areas…")
+
+        competition, competitor_pois = find_competitors_in_similar_cells(
+            scored,
+            brand_pois=brand_pois_df,
+            brand_query=brand_query or "",
+            min_similarity=0.5,
+            country=country,
+            city=city,
+        )
+
+        if competitor_pois is not None and not competitor_pois.empty:
+            scored = compute_opportunity_score(scored, competition, beta=beta)
+
+            # Debug: show the merged table so we can verify h3_hex matching
+            with st.expander(
+                f"🔍 DEBUG: Merged scored + competition ({len(scored)} rows, "
+                f"{(scored['competitor_count'] > 0).sum()} with competitors)",
+                expanded=True,
+            ):
+                debug_cols = [
+                    c for c in [
+                        "h3_cell", "h3_hex", "similarity",
+                        "competitor_count", "top_competitors",
+                        "competition_score", "opportunity_score",
+                        "is_brand_cell",
+                    ] if c in scored.columns
+                ]
+                has_comp = scored[scored["competitor_count"] > 0]
+                st.caption(f"Rows with competitor_count > 0: {len(has_comp)}")
+                if not has_comp.empty:
+                    st.dataframe(
+                        has_comp[debug_cols]
+                        .sort_values("competitor_count", ascending=False)
+                        .head(30),
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+                else:
+                    st.warning("No rows have competitor_count > 0 after merge!")
+                    st.caption("Competition h3_hex sample:")
+                    st.write(competition["h3_hex"].head(10).tolist())
+                    st.caption("Scored h3_hex sample:")
+                    if "h3_hex" in scored.columns:
+                        st.write(scored["h3_hex"].head(10).tolist())
+                    else:
+                        st.write("h3_hex column missing from scored!")
+
+        if not competition.empty and competitor_pois is not None and not competitor_pois.empty:
+            with st.expander(
+                f"📊 Competition per H3 cell ({len(competition)} cells)",
+                expanded=True,
+            ):
+                st.dataframe(
+                    competition.sort_values("competitor_count", ascending=False).head(30),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+    poi_totals = count_vectors.sum(axis=1).rename("poi_density")
+    scored = scored.merge(poi_totals, left_on="h3_cell", right_index=True, how="left")
+    scored["poi_density"] = scored["poi_density"].fillna(0).astype(int)
+
     top_opps = get_top_opportunities(scored, top_n=20)
 
     address_lookup = get_nearest_address_per_cell(pois_df)
@@ -251,6 +399,7 @@ if run_button:
         address_lookup,
         count_vectors=count_vectors,
         brand_avg=brand_avg,
+        competitor_pois=competitor_pois,
     )
 
     progress.progress(100, text="Done!")
@@ -341,12 +490,28 @@ if run_button:
 
     col_legend, _ = st.columns([1, 2])
     with col_legend:
+        if competitor_pois is None or competitor_pois.empty:
+            st.markdown(
+                "🔵 **Existing locations** &nbsp;|&nbsp; "
+                "🟢 **Top opportunities** &nbsp;|&nbsp; "
+                "🟥→🟦 **Similarity heatmap** (red = high, blue = low)"
+            )
+    has_competition = "opportunity_score" in scored.columns
+
+    if has_competition:
+        st.caption(
+            "Hover over a hexagon to see opportunity score, similarity, "
+            "competitor count, and top POI category comparison."
+        )
+    else:
+        st.caption("Hover over a hexagon to see its similarity score and top POI category comparison.")
+
+    if competitor_pois is not None and not competitor_pois.empty:
         st.markdown(
             "🔵 **Existing locations** &nbsp;|&nbsp; "
             "🟢 **Top opportunities** &nbsp;|&nbsp; "
-            "🟥→🟦 **Similarity heatmap** (red = high, blue = low)"
+            "🟥→🟦 **Score heatmap** (red = high, blue = low)"
         )
-    st.caption("Hover over a hexagon to see its similarity score and top POI category comparison.")
 
     st.pydeck_chart(deck)
 
@@ -362,10 +527,26 @@ if run_button:
     display["latitude"] = centres.apply(lambda x: round(x[0], 5))
     display["longitude"] = centres.apply(lambda x: round(x[1], 5))
 
+    table_cols = ["address", "similarity_pct", "latitude", "longitude"]
+    rename_map = {"similarity_pct": "similarity"}
+
+    if has_competition:
+        display["opportunity_pct"] = (
+            (display["opportunity_score"] * 100).round(1).astype(str) + "%"
+        )
+        display["competitors"] = display["competitor_count"].astype(int)
+        table_cols = [
+            "address", "opportunity_pct", "similarity_pct",
+            "competitors", "latitude", "longitude",
+        ]
+        rename_map = {
+            "opportunity_pct": "opportunity",
+            "similarity_pct": "similarity",
+            "competitors": "competitors",
+        }
+
     selection = st.dataframe(
-        display[["address", "similarity_pct", "latitude", "longitude"]].rename(
-            columns={"similarity_pct": "similarity"}
-        ),
+        display[table_cols].rename(columns=rename_map),
         use_container_width=True,
         hide_index=True,
         on_select="rerun",
@@ -384,7 +565,23 @@ if run_button:
         exp = explain_opportunity(sel_cell, count_vectors, brand_avg)
 
         st.markdown(f"### {sel_addr}")
-        st.markdown(f"**Similarity:** {sel_sim} &nbsp;|&nbsp; **{summarise_explanation(exp)}**")
+
+        # Score summary line
+        score_parts = [f"**Vibe Match:** {sel_sim}"]
+        if has_competition:
+            comp_info = explain_competition(sel_cell, scored)
+            if comp_info:
+                opp_pct = f"{comp_info['opportunity_score'] * 100:.1f}%"
+                score_parts.insert(0, f"**Opportunity:** {opp_pct}")
+                score_parts.append(
+                    f"**Competitors:** {comp_info['competitor_count']}"
+                )
+                if comp_info["top_competitors"]:
+                    score_parts.append(
+                        f"**Nearby:** {comp_info['top_competitors']}"
+                    )
+        score_parts.append(f"**{summarise_explanation(exp)}**")
+        st.markdown(" &nbsp;|&nbsp; ".join(score_parts))
 
         cell_counts = exp["counts"]
         comparison_cats = cell_counts.index[

@@ -12,3 +12,5 @@ env:
     value: "dilshad_shawki"
   - name: GOLD_SCHEMA
     value: "geospatial"
+  - name: GENIE_SPACE_ID
+    value: ""

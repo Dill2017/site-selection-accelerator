@@ -17,5 +17,11 @@ build/
 .DS_Store
 Thumbs.db
 
+# Environment
+.env
+
 # Databricks
 .databricks/
+
+# Training logs
+lightning_logs/

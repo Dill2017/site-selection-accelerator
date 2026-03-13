@@ -88,6 +88,26 @@ def summarise_explanation(explanation: dict) -> str:
     return "; ".join(parts)
 
 
+def explain_competition(
+    cell_id: int,
+    scored: pd.DataFrame,
+) -> dict | None:
+    """Return competition breakdown for a cell, if available."""
+    if "opportunity_score" not in scored.columns:
+        return None
+    row = scored[scored["h3_cell"] == cell_id]
+    if row.empty:
+        return None
+    r = row.iloc[0]
+    return {
+        "vibe_score": round(float(r["similarity"]), 3),
+        "competitor_count": int(r.get("competitor_count", 0)),
+        "competition_score": round(float(r.get("competition_score", 0)), 3),
+        "opportunity_score": round(float(r["opportunity_score"]), 3),
+        "top_competitors": r.get("top_competitors", ""),
+    }
+
+
 def tooltip_snippet(
     cell_id: int,
     count_vectors: pd.DataFrame,

@@ -1,4 +1,4 @@
-"""pydeck map builder — CARTO basemap with H3 similarity heatmap."""
+"""pydeck map builder — CARTO basemap with H3 opportunity heatmap."""
 
 from __future__ import annotations
 
@@ -16,17 +16,19 @@ CARTO_BASEMAP = "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json"
 
 
 def _h3_int_to_hex(cell_id: int) -> str:
+    if cell_id < 0:
+        cell_id = cell_id + (1 << 64)
     return h3.int_to_str(cell_id)
 
 
 def _h3_center(cell_id: int) -> tuple[float, float]:
-    hex_str = h3.int_to_str(cell_id)
+    hex_str = _h3_int_to_hex(cell_id)
     lat, lon = h3.cell_to_latlng(hex_str)
     return lat, lon
 
 
-def _similarity_to_rgba(score: float) -> list[int]:
-    """Map similarity 0..1 to a blue→green→red colour ramp with transparency."""
+def _score_to_rgba(score: float) -> list[int]:
+    """Map score 0..1 to a blue→green→red colour ramp with transparency."""
     r = int(np.clip(score * 2, 0, 1) * 255)
     g = int(np.clip(2 - score * 2, 0, 1) * 150)
     b = int((1 - score) * 200)
@@ -41,26 +43,44 @@ def build_map(
     top_n: int = 20,
     count_vectors: Optional[pd.DataFrame] = None,
     brand_avg: Optional[pd.Series] = None,
+    competitor_pois: Optional[pd.DataFrame] = None,
 ) -> pdk.Deck:
     """Build a pydeck Deck with three layers.
 
     Parameters
     ----------
-    scored_df : DataFrame from ``compute_similarity`` with columns
-        h3_cell, similarity, is_brand_cell.
+    scored_df : DataFrame with h3_cell, similarity, is_brand_cell
+        (and optionally opportunity_score, competitor_count, top_competitors).
     brand_locations : list of dicts with lat, lon.
     h3_cells_df : DataFrame with h3_cell, center_lat, center_lon.
     address_lookup : dict mapping h3_cell -> nearest address string.
     top_n : number of top opportunities to highlight.
     count_vectors : optional POI count matrix for tooltip explainability.
     brand_avg : optional brand average counts for tooltip comparison.
+    competitor_pois : unused, kept for API compatibility.
     """
-    # ── 1. H3 heatmap layer (exclude brand cells) ──────────────────────────
+    has_competition = "opportunity_score" in scored_df.columns
+    # ── 1. H3 heatmap layer — coloured by similarity ───────────────────────
     whitespace = scored_df[~scored_df["is_brand_cell"]].copy()
     whitespace["hex_id"] = whitespace["h3_cell"].apply(_h3_int_to_hex)
-    whitespace["color"] = whitespace["similarity"].apply(_similarity_to_rgba)
-    whitespace["address"] = whitespace["h3_cell"].map(address_lookup).fillna("—")
+    whitespace["color"] = whitespace["similarity"].apply(_score_to_rgba)
     whitespace["sim_pct"] = (whitespace["similarity"] * 100).round(1)
+
+    if has_competition:
+        whitespace["opp_pct"] = (whitespace["opportunity_score"] * 100).round(1)
+        whitespace["competitor_count"] = whitespace["competitor_count"].fillna(0).astype(int)
+        whitespace["top_competitors"] = whitespace["top_competitors"].fillna("")
+    else:
+        whitespace["opp_pct"] = whitespace["sim_pct"]
+        whitespace["competitor_count"] = 0
+        whitespace["top_competitors"] = ""
+
+    if "poi_density" in whitespace.columns:
+        whitespace["poi_count"] = whitespace["poi_density"].fillna(0).astype(int)
+    else:
+        whitespace["poi_count"] = 0
+
+    whitespace["address"] = whitespace["h3_cell"].map(address_lookup).fillna("")
 
     if count_vectors is not None and brand_avg is not None:
         whitespace["cat_detail"] = whitespace["h3_cell"].apply(
@@ -68,6 +88,8 @@ def build_map(
         )
     else:
         whitespace["cat_detail"] = ""
+
+    whitespace["brand_count"] = ""
 
     h3_layer = pdk.Layer(
         "H3HexagonLayer",
@@ -81,10 +103,35 @@ def build_map(
         opacity=0.7,
     )
 
-    # ── 2. Brand locations (blue dots) ──────────────────────────────────────
-    brand_df = pd.DataFrame(brand_locations)
-    brand_df["color"] = [[30, 100, 240, 220]] * len(brand_df)
-    brand_df["radius"] = 120
+    # ── 2. Brand locations — snapped to H3 centres, colour by density ──────
+    resolution = h3.get_resolution(
+        _h3_int_to_hex(scored_df["h3_cell"].iloc[0])
+    )
+    cell_counts: dict[str, int] = {}
+    for loc in brand_locations:
+        hex_id = h3.latlng_to_cell(loc["lat"], loc["lon"], resolution)
+        cell_counts[hex_id] = cell_counts.get(hex_id, 0) + 1
+
+    max_count = max(cell_counts.values()) if cell_counts else 1
+    brand_rows: list[dict] = []
+    for hex_id, count in cell_counts.items():
+        clat, clon = h3.cell_to_latlng(hex_id)
+        t = (count - 1) / max(max_count - 1, 1)
+        lightness = int(255 - t * 200)
+        brand_rows.append({
+            "lat": clat,
+            "lon": clon,
+            "brand_count": count,
+            "hex_id": hex_id,
+            "color": [30, 50, lightness, 220],
+            "radius": 120,
+        })
+    brand_df = pd.DataFrame(brand_rows) if brand_rows else pd.DataFrame(
+        columns=["lat", "lon", "brand_count", "hex_id", "color", "radius"]
+    )
+    for col in ("address", "opp_pct", "sim_pct", "poi_count",
+                "competitor_count", "top_competitors", "cat_detail"):
+        brand_df[col] = ""
 
     brand_layer = pdk.Layer(
         "ScatterplotLayer",
@@ -95,8 +142,13 @@ def build_map(
         pickable=True,
     )
 
-    # ── 3. Top opportunity centres (green dots) ─────────────────────────────
-    top_opps = whitespace.head(top_n).copy()
+    # ── 3. Top opportunities (green dots) — top 5% by opp score ─────────────
+    opp_col = "opportunity_score" if has_competition else "similarity"
+    sort_cols = [opp_col]
+    if "poi_density" in whitespace.columns:
+        sort_cols.append("poi_density")
+    n_top = max(1, int(len(whitespace) * 0.02))
+    top_opps = whitespace.sort_values(sort_cols, ascending=False).head(n_top).copy()
     centres = top_opps["h3_cell"].apply(
         lambda c: pd.Series(_h3_center(c), index=["lat", "lon"])
     )
@@ -110,10 +162,12 @@ def build_map(
         get_position=["lon", "lat"],
         get_fill_color="color",
         get_radius="radius",
-        pickable=True,
+        pickable=False,
     )
 
-    # ── View state (center on the data) ─────────────────────────────────────
+    layers = [h3_layer, brand_layer, top_layer]
+
+    # ── View state ──────────────────────────────────────────────────────────
     center_lat = h3_cells_df["center_lat"].mean()
     center_lon = h3_cells_df["center_lon"].mean()
 
@@ -124,15 +178,39 @@ def build_map(
         pitch=0,
     )
 
+    # ── Tooltip ─────────────────────────────────────────────────────────────
+    # Each row is a <div> that collapses to display:none when value is empty
+    # via the :empty pseudo-selector on an inner <span>.
+    def _row(label: str, field: str, suffix: str = "") -> str:
+        val = f"{{{field}}}{suffix}"
+        return (
+            f'<div class="tt-row" data-field="{field}">'
+            f"<b>{label}:</b> <span>{val}</span></div>"
+        )
+
+    tooltip_html = (
+        "<style>"
+        ".tt-row span:empty { display: none; }"
+        ".tt-row:has(span:empty) { display: none; }"
+        "</style>"
+    )
+    tooltip_html += _row("H3 Cell", "hex_id")
+    tooltip_html += _row("Brand Locations", "brand_count")
+    tooltip_html += _row("Address", "address")
+    tooltip_html += _row("Opportunity Score", "opp_pct", "%")
+    tooltip_html += _row("Similarity", "sim_pct", "%")
+    tooltip_html += _row("POI Count", "poi_count")
+    if has_competition:
+        tooltip_html += _row("Competitors", "competitor_count")
+        tooltip_html += _row("Top 3 Competitors", "top_competitors")
+    tooltip_html += (
+        "<hr style='margin:4px 0;border-color:#555'/>"
+        "<b>POI Mix</b> (this cell / brand avg):<br/>"
+        "{cat_detail}"
+    )
+
     tooltip = {
-        "html": (
-            "<b>Similarity:</b> {sim_pct}%<br/>"
-            "<b>Address:</b> {address}<br/>"
-            "<b>H3 Cell:</b> {hex_id}<br/>"
-            "<hr style='margin:4px 0;border-color:#555'/>"
-            "<b>Top Categories</b> (cell / brand avg):<br/>"
-            "{cat_detail}"
-        ),
+        "html": tooltip_html,
         "style": {
             "backgroundColor": "#1a1a2e",
             "color": "white",
@@ -142,7 +220,7 @@ def build_map(
     }
 
     return pdk.Deck(
-        layers=[h3_layer, brand_layer, top_layer],
+        layers=layers,
         initial_view_state=view_state,
         map_style=CARTO_BASEMAP,
         tooltip=tooltip,
