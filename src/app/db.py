@@ -23,7 +23,10 @@ _lock = threading.Lock()
 
 
 def _create_connection() -> dbsql.client.Connection:
-    cfg = Config()
+    if os.environ.get("DATABRICKS_RUNTIME_VERSION") or os.environ.get("IS_DATABRICKS_APP"):
+        cfg = Config()
+    else:
+        cfg = Config(profile="DEFAULT")
     host = cfg.host
     if host and host.startswith("https://"):
         host = host[len("https://"):]

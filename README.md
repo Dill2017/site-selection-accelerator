@@ -1,17 +1,23 @@
 # Site Selection Accelerator — Brand Site Matching
 
 A Databricks solution accelerator that helps retail operations teams identify
-**whitespace expansion opportunities** for their brand. Given a set of existing
-store locations and a target city, the application builds a geospatial profile of
-the brand, then scores every H3 hexagonal cell in the target city by similarity
-to that profile — surfacing the areas that best match the brand's preferred
-surroundings but don't yet have a presence.
+**whitespace expansion opportunities** for their brand. Users can search by
+**brand name** (e.g. "Starbucks", "Premier Inn") or enter coordinates directly.
+The app discovers existing locations via **Databricks Vector Search** on enriched
+POI text features, builds a geospatial profile using **Hex2Vec** embeddings,
+scores every H3 hexagonal cell in the target city by neighbourhood similarity,
+and applies a **competition penalty** based on co-located competitors — surfacing
+the areas that best match the brand's surroundings but aren't yet saturated.
 
 Brand locations can be in **any city** — the tool learns what kind of
 neighbourhoods a brand thrives in and finds similar areas in the target market,
 enabling cross-city expansion analysis.
 
 **Use cases:** franchise expansion, competitive gap analysis, new market entry.
+
+> **Detailed technical notes:** see
+> [INTEGRATION_PLAN.md](INTEGRATION_PLAN.md) for architecture diagrams,
+> scoring formula, category filtering details, and file change summary.
 
 ---
 
@@ -22,11 +28,20 @@ enabling cross-city expansion analysis.
 │                        Streamlit Application                         │
 │                                                                      │
 │  ┌──────────────┐  ┌──────────────┐  ┌────────────┐  ┌───────────┐  │
-│  │ Brand        │  │ Target city  │  │ H3         │  │ POI       │  │
-│  │ locations    │  │ & country    │  │ resolution │  │ categories│  │
+│  │ Brand name   │  │ Target city  │  │ H3         │  │ POI       │  │
+│  │ or lat/lon   │  │ & country    │  │ resolution │  │ categories│  │
 │  └──────┬───────┘  └──────┬───────┘  └──────┬─────┘  └─────┬─────┘  │
 │         └────────┬────────┴─────────────────┴───────────────┘        │
 │                  ▼                                                    │
+│  ┌──────────────────────────────────────────────────────────────┐    │
+│  │       Brand Discovery (brand_search.py)  [NEW]               │    │
+│  │                                                              │    │
+│  │  1. LLM intent detection → category pre-filter              │    │
+│  │  2. Databricks Vector Search on text-feature embeddings      │    │
+│  │  3. Brand POI refinement (name match + dominant category)    │    │
+│  │  → brand locations (lat/lon + H3 cells)                      │    │
+│  └──────────────────────────┬───────────────────────────────────┘    │
+│                             ▼                                        │
 │  ┌──────────────────────────────────────────────────────────────┐    │
 │  │         DBSQL Queries on Gold Tables (pipeline.py)           │    │
 │  │                                                              │    │
@@ -46,55 +61,62 @@ enabling cross-city expansion analysis.
 │  └──────────────────────────┬───────────────────────────────────┘    │
 │                             ▼                                        │
 │  ┌──────────────────────────────────────────────────────────────┐    │
-│  │         Cosine Similarity Scoring (similarity.py)            │    │
+│  │   Cosine Similarity + Opportunity Scoring (similarity.py)    │    │
 │  │                                                              │    │
 │  │  • Average brand-cell embeddings → brand profile             │    │
 │  │  • Cosine similarity vs all target-city cells                │    │
-│  │  • Exclude existing locations, rank by score                 │    │
+│  │  • Competition penalty: opp = sim × (1 − β × comp_score)    │    │
+│  │  • POI density tiebreaking for equal scores                  │    │
 │  └──────────────────────────┬───────────────────────────────────┘    │
-│                             ▼                                        │
-│  ┌──────────────────────────────────────────────────────────────┐    │
-│  │        Score Explainability (explainability.py)             │    │
-│  │                                                              │    │
-│  │  • Brand profile from POI count vectors (avg + per-cell)     │    │
-│  │  • Per-opportunity category comparison vs brand average       │    │
-│  │  • Text summaries and tooltip snippets                        │    │
-│  └──────────────────────────┬───────────────────────────────────┘    │
-│                             ▼                                        │
+│                             │                                        │
+│          ┌──────────────────┤                                        │
+│          ▼                  ▼                                        │
+│  ┌────────────────┐  ┌──────────────────────────────────────────┐    │
+│  │ Competition     │  │  Score Explainability (explainability.py)│    │
+│  │ Analysis  [NEW] │  │                                          │    │
+│  │ (brand_search)  │  │  • Brand profile (avg POI counts)        │    │
+│  │                 │  │  • Category comparison vs brand average   │    │
+│  │ • Similar cells │  │  • Competition detail panel               │    │
+│  │ • Enriched POI  │  └──────────────────────────┬───────────────┘    │
+│  │   table query   │                             │                   │
+│  │ • Category      │                             │                   │
+│  │   filtering     │                             │                   │
+│  └────────┬────────┘                             │                   │
+│           └──────────────────┬───────────────────┘                   │
+│                              ▼                                       │
 │  ┌──────────────────────────────────────────────────────────────┐    │
 │  │             pydeck Map Visualisation (map_viz.py)            │    │
 │  │                                                              │    │
 │  │  • CARTO basemap                                             │    │
 │  │  • H3HexagonLayer — similarity heatmap                       │    │
 │  │  • ScatterplotLayer — existing locations (blue)              │    │
-│  │  • ScatterplotLayer — top opportunities (green)              │    │
-│  │  • Enhanced tooltips with category breakdowns                 │    │
+│  │  • ScatterplotLayer — top 2% opportunities (green)           │    │
+│  │  • Tooltips: opp score, similarity, competitors, POI count   │    │
 │  └──────────────────────────────────────────────────────────────┘    │
 └───────────────────────────────────────────────────────────────────────┘
                               │
-           ┌──────────────────┴──────────────────┐
-           ▼                                     ▼
-  ┌───────────────────────┐          ┌──────────────────────┐
-  │  Gold Tables           │          │  Databricks SQL      │
-  │  (Unity Catalog)       │          │  Warehouse           │
-  │                        │          │                      │
-  │  • gold_cities         │          │  H3 functions:       │
-  │    (pre-joined polys,  │          │   h3_polyfillash3    │
-  │     bboxes, WKT)       │          │   h3_longlatash3     │
-  │  • gold_places         │          │   h3_centerasgeojson │
-  │    (flattened coords,  │          │                      │
-  │     categories)        │          │  Populated by ETL    │
-  └───────────────────────┘          │  job from CARTO      │
-           ▲                          │  Overture Maps       │
-           │                          └──────────────────────┘
-  ┌───────────────────────┐
-  │  ETL Job               │
-  │  (SQL tasks on DBSQL)  │
-  │                        │
-  │  CARTO Overture Maps   │
-  │  → gold_cities         │
-  │  → gold_places         │
-  └───────────────────────┘
+     ┌────────────────────────┼────────────────────────┐
+     ▼                        ▼                         ▼
+┌──────────────────┐ ┌──────────────────┐ ┌──────────────────────┐
+│  Gold Tables      │ │  Enriched POI    │ │  Databricks SQL      │
+│  (Unity Catalog)  │ │  Table + VS      │ │  Warehouse           │
+│                   │ │  Index  [NEW]    │ │                      │
+│  • gold_cities    │ │                  │ │  H3 functions:       │
+│  • gold_places    │ │  • site_sel...   │ │   h3_polyfillash3    │
+│                   │ │    _embedding    │ │   h3_longlatash3     │
+│                   │ │  • site_        │ │   h3_centerasgeojson │
+│                   │ │    embeddings   │ │                      │
+└──────────────────┘ │    (VS index)    │ └──────────────────────┘
+         ▲            └──────────────────┘
+         │
+┌───────────────────────┐
+│  ETL Job               │
+│  (SQL tasks on DBSQL)  │
+│                        │
+│  CARTO Overture Maps   │
+│  → gold_cities         │
+│  → gold_places         │
+└───────────────────────┘
 ```
 
 ---
@@ -202,13 +224,21 @@ time, making the app significantly faster.
 
 The Streamlit sidebar collects:
 
-- **Brand locations**: either as `lat, lon` pairs or street addresses
-  (geocoded via Nominatim/geopy). These can be in **any city** — not just the
-  target city.
+- **Brand name** (e.g. "Starbucks", "Premier Inn") — discovered via Vector
+  Search on enriched POI text features. An LLM detects the target business
+  category to pre-filter results, followed by brand name matching and dominant
+  category refinement to clean up false positives.
+- **Or brand locations**: `lat, lon` pairs or street addresses (geocoded via
+  Nominatim/geopy). These can be in **any city** — not just the target city.
 - **H3 resolution** (7–10): controls hexagon granularity.
-- **Target country and city**: cascading dropdowns populated from `gold_cities`.
+- **Target country and city**: cascading dropdowns populated from `gold_cities`
+  (defaults to GB / London).
 - **POI categories**: multi-select grouped by theme (Food & Drink, Shopping,
   Services, Entertainment, Commercial).
+- **Brand / competitor match thresholds**: minimum Vector Search similarity
+  score (default 0.45).
+- **Competition sensitivity (beta)**: slider from 0 to 1 controlling how
+  heavily competition penalises the opportunity score.
 
 ### Step 3 — Cross-City Brand Profiling (`pipeline.py`)
 
@@ -236,16 +266,24 @@ Using the [SRAI](https://kraina-ai.github.io/srai/) library:
 > **Deep dive:** See [HEX2VEC_EXPLAINER.md](HEX2VEC_EXPLAINER.md) for a
 > full explanation of how Hex2Vec works.
 
-### Step 5 — Cosine Similarity (`similarity.py`)
+### Step 5 — Cosine Similarity & Opportunity Scoring (`similarity.py`)
 
 1. Maps each brand location to its H3 cell at the chosen resolution.
 2. Averages those cell embeddings to form a **brand profile vector**.
 3. Computes cosine similarity between the brand profile and every target city
    cell's embedding.
-4. Re-normalises scores to [0, 1] within the target city for colour contrast.
+4. Re-normalises scores to [0, 1] within the target city for colour contrast
+   (single-pass normalisation).
 5. Excludes cells where the brand already has a location.
-6. Ranks remaining cells descending by similarity — these are the
-   **whitespace opportunities**.
+6. **Competition analysis** (when using brand name search): queries the
+   enriched POI table for businesses in high-similarity cells matching the
+   brand's categories. Categories are filtered via a frequency gate and LLM
+   industry filter to remove noise (e.g. distributors, B2B suppliers).
+7. Computes **opportunity score**:
+   `opportunity = similarity × (1 − β × competition_score)` where
+   `competition_score = competitor_count / max(competitor_count)`.
+8. Ranks cells by opportunity score, using **POI density** as a tiebreaker
+   for equally-scored cells.
 
 ### Step 6 — Map Visualisation (`map_viz.py`)
 
@@ -255,12 +293,15 @@ basemap:
 | Layer | Description |
 |---|---|
 | **H3HexagonLayer** | All candidate cells coloured by similarity score (red = high, blue = low) |
-| **ScatterplotLayer (blue)** | Existing brand locations |
-| **ScatterplotLayer (green)** | Top 20 recommended opportunity locations (cell centres) |
+| **ScatterplotLayer (blue)** | Existing brand locations (non-pickable for tooltip pass-through) |
+| **ScatterplotLayer (green)** | Top 2% opportunity locations by opportunity score + POI density (non-pickable) |
 
-Hovering over any H3 cell shows a tooltip with the similarity percentage,
-nearest address, cell ID, and a **category breakdown** comparing the cell's
-top POI counts against the brand average.
+Hovering over any H3 cell shows a tooltip with:
+- H3 cell ID and nearest address
+- Opportunity score and similarity percentage
+- POI count (total amenities in the cell)
+- Competitor count and top 3 competitor names (ranked by popularity)
+- Category breakdown comparing the cell's POI mix against the brand average
 
 ### Step 7 — Score Explainability (`explainability.py`)
 
@@ -287,6 +328,7 @@ site_selection_accelerator/
 ├── databricks.yml                    # Asset Bundle config (catalog, schema, warehouse)
 ├── README.md                         # This file
 ├── HEX2VEC_EXPLAINER.md             # Deep dive into the Hex2Vec algorithm
+├── INTEGRATION_PLAN.md              # Detailed technical notes for competitive analysis
 ├── resources/
 │   ├── site_selection_app.yml        # Databricks App resource definition
 │   └── geospatial_etl_job.yml        # ETL job: SQL tasks to build gold tables
@@ -294,14 +336,16 @@ site_selection_accelerator/
     ├── app/
     │   ├── app.yaml                  # App runtime config (command, env vars)
     │   ├── requirements.txt          # Python dependencies
+    │   ├── .env                      # Local dev env vars (not committed)
     │   ├── app.py                    # Streamlit UI + orchestration
-    │   ├── config.py                 # Gold table references, categories, resolutions
-    │   ├── db.py                     # DBSQL connection (cached, auto-reconnect)
+    │   ├── config.py                 # Gold table refs, categories, VS index, thresholds
+    │   ├── db.py                     # DBSQL connection (cached, auto-reconnect, PAT/SP)
     │   ├── pipeline.py               # DBSQL queries on gold tables + cross-city logic
     │   ├── embeddings.py             # SRAI Hex2Vec embedding pipeline
-    │   ├── similarity.py             # Cosine similarity scoring
-    │   ├── explainability.py         # Score explainability (brand profile, category comparisons)
-    │   └── map_viz.py                # pydeck map construction
+    │   ├── similarity.py             # Cosine similarity + opportunity scoring
+    │   ├── brand_search.py           # Brand discovery (VS) + competition analysis
+    │   ├── explainability.py         # Score explainability + competition detail
+    │   └── map_viz.py                # pydeck map construction (similarity heatmap)
     └── pipeline/
         └── transformations/
             ├── setup_schema.sql      # CREATE SCHEMA IF NOT EXISTS
@@ -333,7 +377,8 @@ site_selection_accelerator/
 | `pydeck` | Deck.gl map rendering in Streamlit |
 | `geopy` | Optional address geocoding via Nominatim |
 | `databricks-sql-connector` | DBSQL query execution |
-| `databricks-sdk` | Workspace authentication (Config) |
+| `databricks-sdk` | Workspace authentication, Vector Search client, Foundation Model API |
+| `python-dotenv` | Load `.env` variables for local development |
 
 ---
 
@@ -380,9 +425,9 @@ To add custom categories, edit the `CATEGORY_GROUPS` dictionary in
 - **Alternative embedders** — swap `Hex2VecEmbedder` for SRAI's
   `CountEmbedder` (no training needed, faster) or
   `ContextualCountEmbedder` (neighbourhood-aware counts).
-- **Brand detection** — the Overture places table has a `brand.names.primary`
-  field. You can auto-detect existing brand locations by querying this field
-  instead of requiring manual input.
+- **Brand detection** — now implemented via Vector Search on enriched POI
+  text features. See `brand_search.py` for the full pipeline including LLM
+  intent detection, brand POI refinement, and competition analysis.
 
 ---
 

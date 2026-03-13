@@ -47,7 +47,12 @@ def build_features_gdf(
     pois_df: pd.DataFrame,
     categories: list[str],
 ) -> gpd.GeoDataFrame:
-    """Create a GeoDataFrame of POI features with one-hot category columns."""
+    """Create a GeoDataFrame of POI features with category indicator columns.
+
+    Each POI still gets a 1 for its own category (SRAI expects per-POI
+    features).  Density is captured because cells with more POIs contribute
+    more rows, so Hex2Vec's aggregation naturally sums higher counts.
+    """
     geom = [Point(row.lon, row.lat) for _, row in pois_df.iterrows()]
     gdf = gpd.GeoDataFrame(pois_df, geometry=geom, crs="EPSG:4326")
     gdf = gdf.set_index("poi_id")
