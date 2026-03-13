@@ -26,6 +26,7 @@ from config import CATEGORY_GROUPS, DEFAULT_H3_RESOLUTION, H3_RESOLUTIONS
 from embeddings import run_embedding_pipeline
 from explainability import (
     build_brand_profile,
+    build_fingerprint_df,
     explain_competition,
     explain_opportunity,
     summarise_explanation,
@@ -404,8 +405,36 @@ if run_button:
 
     progress.progress(100, text="Done!")
 
-    # -- Display results -----------------------------------------------------
+    st.session_state["results"] = {
+        "count_vectors": count_vectors,
+        "brand_avg": brand_avg,
+        "brand_profile": brand_profile,
+        "scored": scored,
+        "top_opps": top_opps,
+        "deck": deck,
+        "address_lookup": address_lookup,
+        "competitor_pois": competitor_pois,
+        "brand_locations": brand_locations,
+        "city_h3_cells_df": city_h3_cells_df,
+        "pois_df": pois_df,
+    }
 
+# ── Display results (from session state, survives reruns) ───────────────────
+
+if "results" not in st.session_state:
+    st.stop()
+
+_r = st.session_state["results"]
+count_vectors = _r["count_vectors"]
+brand_avg = _r["brand_avg"]
+brand_profile = _r["brand_profile"]
+scored = _r["scored"]
+top_opps = _r["top_opps"]
+deck = _r["deck"]
+address_lookup = _r["address_lookup"]
+competitor_pois = _r["competitor_pois"]
+
+if True:
     # ── Brand Location Profile ──────────────────────────────────────────────
     st.subheader("Brand Location Profile")
     st.caption(
@@ -583,41 +612,108 @@ if run_button:
         score_parts.append(f"**{summarise_explanation(exp)}**")
         st.markdown(" &nbsp;|&nbsp; ".join(score_parts))
 
-        cell_counts = exp["counts"]
-        comparison_cats = cell_counts.index[
-            (cell_counts > 0) | (brand_avg.reindex(cell_counts.index, fill_value=0) > 0)
-        ]
-        if len(comparison_cats) > 0:
-            comp_df = pd.DataFrame({
-                "Category": [c.replace("_", " ").title() for c in comparison_cats],
-                "This Location": [int(cell_counts[c]) for c in comparison_cats],
-                "Brand Average": [round(brand_avg.get(c, 0), 1) for c in comparison_cats],
-            })
+        try:
+            fingerprint = build_fingerprint_df(sel_cell, count_vectors, brand_avg)
+        except Exception as e:
+            st.error(f"Error building fingerprint: {e}")
+            fingerprint = pd.DataFrame()
 
-            comp_melted = comp_df.melt(
-                id_vars="Category", var_name="Source", value_name="Count"
+        if fingerprint.empty:
+            st.info("No POI categories present in this cell or the brand profile.")
+        else:
+            st.markdown("#### Category Fingerprint")
+            st.caption(
+                "Compare the full POI category distribution of this location "
+                "against the brand average. Similar shapes indicate a strong vibe match."
             )
 
-            comparison_chart = (
-                alt.Chart(comp_melted)
-                .mark_bar(opacity=0.85)
-                .encode(
-                    x=alt.X("Count:Q", title="POI Count"),
-                    y=alt.Y("Category:N", sort="-x", title=None),
+            col_chart, col_metric = st.columns([1, 1])
+            with col_chart:
+                chart_style = st.radio(
+                    "Chart style",
+                    ["Line", "Bar"],
+                    horizontal=True,
+                    key="fp_chart_style",
+                )
+            with col_metric:
+                metric = st.radio(
+                    "Metric",
+                    ["Counts", "% of Total"],
+                    horizontal=True,
+                    key="fp_metric",
+                )
+
+            if metric == "% of Total":
+                val_col = "Value (%)"
+                y_title = "% of Total POIs"
+                fp_plot = fingerprint.rename(columns={
+                    "This Location (%)": "This Location",
+                    "Brand Average (%)": "Brand Average",
+                })[["Category", "Group", "This Location", "Brand Average"]]
+            else:
+                val_col = "Value"
+                y_title = "POI Count"
+                fp_plot = fingerprint[["Category", "Group", "This Location", "Brand Average"]]
+
+            cat_order = fp_plot["Category"].tolist()
+
+            fp_melted = fp_plot.melt(
+                id_vars=["Category", "Group"],
+                var_name="Source",
+                value_name=val_col,
+            )
+
+            color_scale = alt.Scale(
+                domain=["This Location", "Brand Average"],
+                range=["#2ecc71", "#3498db"],
+            )
+
+            if chart_style == "Line":
+                base = alt.Chart(fp_melted).encode(
+                    x=alt.X(
+                        "Category:N",
+                        sort=cat_order,
+                        title=None,
+                        axis=alt.Axis(labelAngle=-45),
+                    ),
+                    y=alt.Y(f"{val_col}:Q", title=y_title),
                     color=alt.Color(
                         "Source:N",
-                        scale=alt.Scale(
-                            domain=["This Location", "Brand Average"],
-                            range=["#2ecc71", "#3498db"],
-                        ),
+                        scale=color_scale,
                         title=None,
                         legend=alt.Legend(orient="top"),
                     ),
-                    xOffset="Source:N",
-                    tooltip=["Category", "Source", "Count"],
+                    tooltip=["Category", "Group", "Source", f"{val_col}:Q"],
                 )
-                .properties(height=max(len(comp_df) * 28, 150))
-            )
-            st.altair_chart(comparison_chart, use_container_width=True)
-        else:
-            st.info("No POI categories present in this cell or the brand profile.")
+                fp_chart = (
+                    (base.mark_line(interpolate="monotone") + base.mark_point(size=30))
+                    .properties(height=350)
+                )
+            else:
+                fp_chart = (
+                    alt.Chart(fp_melted)
+                    .mark_bar(opacity=0.85)
+                    .encode(
+                        x=alt.X(
+                            "Category:N",
+                            sort=cat_order,
+                            title=None,
+                            axis=alt.Axis(labelAngle=-45),
+                        ),
+                        y=alt.Y(f"{val_col}:Q", title=y_title),
+                        color=alt.Color(
+                            "Source:N",
+                            scale=color_scale,
+                            title=None,
+                            legend=alt.Legend(orient="top"),
+                        ),
+                        xOffset="Source:N",
+                        tooltip=["Category", "Group", "Source", f"{val_col}:Q"],
+                    )
+                    .properties(height=350)
+                )
+
+            try:
+                st.altair_chart(fp_chart, use_container_width=True)
+            except Exception as e:
+                st.error(f"Error rendering fingerprint chart: {e}")

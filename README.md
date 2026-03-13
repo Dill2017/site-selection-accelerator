@@ -331,9 +331,13 @@ explanations using the raw POI count vectors:
   by category group (Food & Drink, Shopping, etc.).
 - **Enhanced tooltips** — hovering any hexagon on the map shows the top 4
   categories in that cell compared to the brand average.
-- **Row-select detail panel** — clicking any row in the Top 20 table reveals a
-  side-by-side grouped bar chart comparing that opportunity's category counts
-  against the brand average.
+- **Category Fingerprint** — clicking any row in the Top 20 table reveals a
+  fingerprint chart showing **all** POI categories (not just non-zero ones) for
+  the selected location versus the brand average. Users can toggle between
+  **line chart** (to compare distribution shapes) and **bar chart** modes, and
+  between raw **counts** and **% of total** (normalised) views. The normalised
+  view lets you compare the shape of the distribution even when absolute POI
+  counts differ significantly between the location and the brand profile.
 
 ---
 

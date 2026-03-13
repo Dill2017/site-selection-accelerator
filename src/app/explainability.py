@@ -108,6 +108,62 @@ def explain_competition(
     }
 
 
+def build_fingerprint_df(
+    cell_id: int,
+    count_vectors: pd.DataFrame,
+    brand_avg: pd.Series,
+) -> pd.DataFrame:
+    """Build a full-category fingerprint comparison DataFrame.
+
+    Returns a DataFrame with one row per category (including zeros),
+    sorted by category group then alphabetically, with both raw counts
+    and normalised (% of total) columns for shape comparison.
+    """
+    all_cats = count_vectors.columns.tolist()
+
+    if cell_id in count_vectors.index:
+        cell_counts = count_vectors.loc[cell_id]
+    else:
+        cell_counts = pd.Series(0, index=all_cats)
+
+    brand_vals = brand_avg.reindex(all_cats, fill_value=0)
+
+    group_lookup: dict[str, str] = {}
+    group_order: dict[str, int] = {}
+    for idx, (grp, cats) in enumerate(CATEGORY_GROUPS.items()):
+        group_order[grp] = idx
+        for c in cats:
+            group_lookup[c] = grp
+
+    df = pd.DataFrame({
+        "category_raw": all_cats,
+        "Category": [c.replace("_", " ").title() for c in all_cats],
+        "Group": [group_lookup.get(c, "Other") for c in all_cats],
+        "This Location": [float(cell_counts[c]) for c in all_cats],
+        "Brand Average": [float(brand_vals[c]) for c in all_cats],
+    })
+
+    df["_group_order"] = df["Group"].map(
+        lambda g: group_order.get(g, len(group_order))
+    )
+    df = df.sort_values(
+        ["_group_order", "Category"], ascending=True
+    ).drop(columns="_group_order").reset_index(drop=True)
+
+    cell_total = df["This Location"].sum()
+    brand_total = df["Brand Average"].sum()
+    df["This Location (%)"] = (
+        (df["This Location"] / cell_total * 100).round(1) if cell_total > 0
+        else 0.0
+    )
+    df["Brand Average (%)"] = (
+        (df["Brand Average"] / brand_total * 100).round(1) if brand_total > 0
+        else 0.0
+    )
+
+    return df
+
+
 def tooltip_snippet(
     cell_id: int,
     count_vectors: pd.DataFrame,
