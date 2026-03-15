@@ -48,7 +48,7 @@ enabling cross-city expansion analysis.
 │  │                                                              │    │
 │  │  1. City polygon from gold_cities    (pre-computed WKT)      │    │
 │  │  2. H3 tessellation via h3_polyfillash3 (fast polygon fill)  │    │
-│  │  3. POI lookup from gold_places_enriched (flattened CARTO)   │    │
+│  │  3. POI lookup from gold_places          (flattened CARTO)   │    │
 │  │  4. Cross-city brand neighbourhood   (for external brands)   │    │
 │  └──────────────────────────┬───────────────────────────────────┘    │
 │                             ▼                                        │

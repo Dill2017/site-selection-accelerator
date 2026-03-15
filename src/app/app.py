@@ -270,7 +270,7 @@ if run_button:
             f"fetching neighbourhood context…",
         )
         brand_ctx_cells, brand_ctx_pois = get_pois_around_points(
-            brand_outside, resolution, selected_cats, k_ring=2
+            brand_outside, resolution, selected_cats, k_ring=2,
         )
         new_cells = brand_ctx_cells[
             ~brand_ctx_cells["h3_cell"].isin(city_cell_set)
@@ -292,7 +292,7 @@ if run_button:
         pois_df = city_pois_df
 
     n_pois = len(pois_df)
-    progress.progress(40, text=f"Found {n_pois:,} POIs in {len(selected_cats)} categories.")
+    progress.progress(40, text=f"Found {n_pois:,} POIs across {len(selected_cats)} categories.")
 
     if pois_df.empty:
         st.warning("No POIs found for the selected categories in this city.")
@@ -301,8 +301,10 @@ if run_button:
     progress.progress(45, text="Building count vectors…")
     count_vectors = build_count_vectors(pois_df)
 
-    progress.progress(50, text="Training Hex2Vec embeddings (this may take a minute)…")
-    embeddings = run_embedding_pipeline(h3_cells_df, pois_df, selected_cats)
+    progress.progress(50, text="Training Hex2Vec (this may take a minute)…")
+    embeddings = run_embedding_pipeline(
+        h3_cells_df, pois_df, selected_cats,
+    )
 
     progress.progress(80, text="Computing similarity scores…")
     scored, brand_cells_in_emb = compute_similarity(
@@ -322,7 +324,7 @@ if run_button:
     else:
         scored["similarity"] = np.zeros(len(scored))
 
-    # -- Competition analysis (all input modes) ──────────────────────────────
+    # -- Competition analysis ────────────────────────────────────────────────
     competitor_pois = None
     if enable_competition and beta > 0 and brand_pois_df is not None and not brand_pois_df.empty:
         progress.progress(85, text="Finding competitors in similar areas…")
@@ -338,51 +340,6 @@ if run_button:
 
         if competitor_pois is not None and not competitor_pois.empty:
             scored = compute_opportunity_score(scored, competition, beta=beta)
-
-            # Debug: show the merged table so we can verify h3_hex matching
-            with st.expander(
-                f"🔍 DEBUG: Merged scored + competition ({len(scored)} rows, "
-                f"{(scored['competitor_count'] > 0).sum()} with competitors)",
-                expanded=True,
-            ):
-                debug_cols = [
-                    c for c in [
-                        "h3_cell", "h3_hex", "similarity",
-                        "competitor_count", "top_competitors",
-                        "competition_score", "opportunity_score",
-                        "is_brand_cell",
-                    ] if c in scored.columns
-                ]
-                has_comp = scored[scored["competitor_count"] > 0]
-                st.caption(f"Rows with competitor_count > 0: {len(has_comp)}")
-                if not has_comp.empty:
-                    st.dataframe(
-                        has_comp[debug_cols]
-                        .sort_values("competitor_count", ascending=False)
-                        .head(30),
-                        use_container_width=True,
-                        hide_index=True,
-                    )
-                else:
-                    st.warning("No rows have competitor_count > 0 after merge!")
-                    st.caption("Competition h3_hex sample:")
-                    st.write(competition["h3_hex"].head(10).tolist())
-                    st.caption("Scored h3_hex sample:")
-                    if "h3_hex" in scored.columns:
-                        st.write(scored["h3_hex"].head(10).tolist())
-                    else:
-                        st.write("h3_hex column missing from scored!")
-
-        if not competition.empty and competitor_pois is not None and not competitor_pois.empty:
-            with st.expander(
-                f"📊 Competition per H3 cell ({len(competition)} cells)",
-                expanded=True,
-            ):
-                st.dataframe(
-                    competition.sort_values("competitor_count", ascending=False).head(30),
-                    use_container_width=True,
-                    hide_index=True,
-                )
 
     poi_totals = count_vectors.sum(axis=1).rename("poi_density")
     scored = scored.merge(poi_totals, left_on="h3_cell", right_index=True, how="left")
@@ -595,7 +552,6 @@ if True:
 
         st.markdown(f"### {sel_addr}")
 
-        # Score summary line
         score_parts = [f"**Vibe Match:** {sel_sim}"]
         if has_competition:
             comp_info = explain_competition(sel_cell, scored)

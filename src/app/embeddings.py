@@ -1,8 +1,8 @@
 """SRAI Hex2Vec geospatial embedding pipeline.
 
 Converts the DBSQL output (POIs assigned to H3 cells) into the
-GeoDataFrames that SRAI expects, then runs Hex2VecEmbedder to produce
-dense embeddings per H3 cell.
+GeoDataFrames that SRAI expects, then trains a Hex2VecEmbedder to
+produce dense embeddings per H3 cell.
 
 SRAI requires H3 hex-string indices (e.g. "891f1d48177ffff").
 DBSQL returns BIGINT cell IDs.  We convert at the boundary.
@@ -10,12 +10,24 @@ DBSQL returns BIGINT cell IDs.  We convert at the boundary.
 
 from __future__ import annotations
 
+import logging
+
 import geopandas as gpd
 import h3
+import numpy as np
 import pandas as pd
-from shapely.geometry import Point, Polygon
+from shapely.geometry import Polygon
 from srai.embedders import Hex2VecEmbedder
 from srai.neighbourhoods import H3Neighbourhood
+
+from config import TRAINING_BATCH_SIZE, TRAINING_EPOCHS
+
+_log = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Index conversion helpers
+# ---------------------------------------------------------------------------
 
 
 def _int_to_hex(cell_id: int) -> str:
@@ -29,6 +41,11 @@ def _hex_to_int(hex_id: str) -> int:
 def _h3_hex_to_polygon(hex_id: str) -> Polygon:
     boundary = h3.cell_to_boundary(hex_id)
     return Polygon([(lon, lat) for lat, lon in boundary])
+
+
+# ---------------------------------------------------------------------------
+# GeoDataFrame builders
+# ---------------------------------------------------------------------------
 
 
 def build_regions_gdf(h3_cells: pd.DataFrame) -> gpd.GeoDataFrame:
@@ -49,19 +66,25 @@ def build_features_gdf(
 ) -> gpd.GeoDataFrame:
     """Create a GeoDataFrame of POI features with category indicator columns.
 
-    Each POI still gets a 1 for its own category (SRAI expects per-POI
-    features).  Density is captured because cells with more POIs contribute
-    more rows, so Hex2Vec's aggregation naturally sums higher counts.
+    Each POI gets a 1 for its own category.  Density is captured because
+    cells with more POIs contribute more rows, so Hex2Vec's aggregation
+    naturally sums higher counts.
     """
-    geom = [Point(row.lon, row.lat) for _, row in pois_df.iterrows()]
+    geom = gpd.points_from_xy(pois_df["lon"], pois_df["lat"])
     gdf = gpd.GeoDataFrame(pois_df, geometry=geom, crs="EPSG:4326")
     gdf = gdf.set_index("poi_id")
     gdf.index.name = "feature_id"
 
+    dummies = pd.get_dummies(gdf["category"], dtype="int8")
     for cat in categories:
-        gdf[cat] = (gdf["category"] == cat).astype(int)
+        if cat not in dummies.columns:
+            dummies[cat] = np.zeros(len(dummies), dtype="int8")
+    gdf = pd.concat([gdf, dummies[categories]], axis=1)
 
-    gdf = gdf.drop(columns=["category", "lon", "lat", "address", "h3_cell"], errors="ignore")
+    gdf = gdf.drop(
+        columns=["category", "lon", "lat", "address", "h3_cell"],
+        errors="ignore",
+    )
     return gdf
 
 
@@ -74,22 +97,25 @@ def build_joint_gdf(pois_df: pd.DataFrame) -> pd.DataFrame:
     return joint
 
 
+# ---------------------------------------------------------------------------
+# Embedding generation
+# ---------------------------------------------------------------------------
+
+
 def generate_embeddings(
     regions_gdf: gpd.GeoDataFrame,
     features_gdf: gpd.GeoDataFrame,
     joint_gdf: pd.DataFrame,
-    max_epochs: int = 5,
-    batch_size: int = 128,
+    max_epochs: int = TRAINING_EPOCHS,
+    batch_size: int = TRAINING_BATCH_SIZE,
 ) -> pd.DataFrame:
-    """Train Hex2Vec and return embeddings indexed by hex-string region_id."""
+    """Train a Hex2VecEmbedder from scratch and return embeddings."""
     neighbourhood = H3Neighbourhood(regions_gdf)
 
+    _log.info("Training Hex2Vec from scratch (epochs=%d)", max_epochs)
     embedder = Hex2VecEmbedder(encoder_sizes=[15, 10])
     embeddings = embedder.fit_transform(
-        regions_gdf,
-        features_gdf,
-        joint_gdf,
-        neighbourhood,
+        regions_gdf, features_gdf, joint_gdf, neighbourhood,
         trainer_kwargs={"max_epochs": max_epochs, "accelerator": "cpu"},
         batch_size=batch_size,
     )
@@ -100,7 +126,7 @@ def run_embedding_pipeline(
     h3_cells_df: pd.DataFrame,
     pois_df: pd.DataFrame,
     categories: list[str],
-    max_epochs: int = 5,
+    max_epochs: int = TRAINING_EPOCHS,
 ) -> pd.DataFrame:
     """End-to-end: build GeoDataFrames, train Hex2Vec, return embeddings.
 
@@ -124,10 +150,10 @@ def run_embedding_pipeline(
         )
 
     embeddings = generate_embeddings(
-        regions_gdf, features_gdf, joint_gdf, max_epochs=max_epochs
+        regions_gdf, features_gdf, joint_gdf,
+        max_epochs=max_epochs,
     )
 
-    # Convert hex-string index back to BIGINT for downstream consumers
     embeddings.index = embeddings.index.map(_hex_to_int)
     embeddings.index.name = "region_id"
     return embeddings
