@@ -22,6 +22,13 @@ resources:
             warehouse_id: ${var.warehouse_id}
             file:
               path: ../src/pipeline/transformations/gold_places.sql
+        - task_key: "create_gold_buildings"
+          depends_on:
+            - task_key: "setup_schema"
+          sql_task:
+            warehouse_id: ${var.warehouse_id}
+            file:
+              path: ../src/pipeline/transformations/gold_buildings.sql
         - task_key: "create_gold_places_enriched"
           depends_on:
             - task_key: "setup_schema"
@@ -33,6 +40,7 @@ resources:
           depends_on:
             - task_key: "create_gold_places_enriched"
             - task_key: "create_gold_cities"
+            - task_key: "create_gold_buildings"
           spark_python_task:
             python_file: ../src/pipeline/setup_genie_space.py
             parameters:

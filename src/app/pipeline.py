@@ -12,7 +12,7 @@ from __future__ import annotations
 import h3 as _h3
 import pandas as pd
 
-from config import GOLD_CITIES_TABLE, GOLD_PLACES_TABLE
+from config import GOLD_BUILDINGS_TABLE, GOLD_CITIES_TABLE, GOLD_PLACES_TABLE
 from db import execute_query
 
 
@@ -136,6 +136,107 @@ def get_pois_with_h3(
         INNER JOIN city_h3 ch ON b.h3_cell = ch.h3_cell
     """
     return execute_query(query)
+
+
+def get_buildings_with_h3(
+    country: str,
+    city: str,
+    resolution: int,
+) -> pd.DataFrame:
+    """Extract buildings inside the city polygon, assign each to an H3 cell.
+
+    Uses the same bbox pre-filter + polygon-cell join pattern as
+    get_pois_with_h3.  Returns one row per building with both its
+    building_category and height_bin so the caller can expand into
+    feature rows.
+
+    Returns DataFrame with columns:
+        building_id, building_category, height_bin, lon, lat, h3_cell
+    """
+    query = f"""
+        WITH city AS (
+            SELECT geom_wkt,
+                   bbox_xmin, bbox_xmax, bbox_ymin, bbox_ymax
+            FROM {GOLD_CITIES_TABLE}
+            WHERE country = '{country}' AND city_name = '{city}'
+            LIMIT 1
+        ),
+        city_h3 AS (
+            SELECT explode(h3_polyfillash3(geom_wkt, {resolution})) AS h3_cell
+            FROM city
+        ),
+        bbox_bldg AS (
+            SELECT
+                b.building_id,
+                b.building_category,
+                b.height_bin,
+                b.lon,
+                b.lat,
+                b.h3_cell
+            FROM {GOLD_BUILDINGS_TABLE} b
+            CROSS JOIN city c
+            WHERE b.lon BETWEEN c.bbox_xmin AND c.bbox_xmax
+              AND b.lat BETWEEN c.bbox_ymin AND c.bbox_ymax
+        )
+        SELECT bb.*
+        FROM bbox_bldg bb
+        INNER JOIN city_h3 ch ON bb.h3_cell = ch.h3_cell
+    """
+    return execute_query(query)
+
+
+def get_buildings_around_points(
+    locations: list[dict],
+    resolution: int,
+    k_ring: int = 2,
+) -> pd.DataFrame:
+    """Fetch buildings around arbitrary lat/lon points.
+
+    Mirrors get_pois_around_points but queries the buildings table.
+
+    Returns DataFrame with columns:
+        building_id, building_category, height_bin, lon, lat, h3_cell
+    """
+    h3_cells_df = tessellate_points(locations, resolution, k_ring)
+    if h3_cells_df.empty:
+        return pd.DataFrame(
+            columns=["building_id", "building_category", "height_bin",
+                     "lon", "lat", "h3_cell"]
+        )
+
+    cell_set = set(h3_cells_df["h3_cell"].tolist())
+
+    seen_centers: set[str] = set()
+    bbox_clauses: list[str] = []
+    for loc in locations:
+        center_hex = _h3.latlng_to_cell(loc["lat"], loc["lon"], resolution)
+        if center_hex in seen_centers:
+            continue
+        seen_centers.add(center_hex)
+
+        disk = _h3.grid_disk(center_hex, k_ring)
+        lats, lons = zip(*[_h3.cell_to_latlng(h) for h in disk])
+        pad = 0.005
+        bbox_clauses.append(
+            f"(bbox_xmin >= {min(lons) - pad} AND bbox_xmax <= {max(lons) + pad} "
+            f"AND bbox_ymin >= {min(lats) - pad} AND bbox_ymax <= {max(lats) + pad})"
+        )
+
+    bbox_filter = " OR ".join(bbox_clauses)
+    query = f"""
+        SELECT
+            building_id,
+            building_category,
+            height_bin,
+            lon,
+            lat,
+            h3_cell
+        FROM {GOLD_BUILDINGS_TABLE}
+        WHERE ({bbox_filter})
+    """
+    bldg_df = execute_query(query)
+    bldg_df = bldg_df[bldg_df["h3_cell"].isin(cell_set)]
+    return bldg_df
 
 
 def build_count_vectors(pois_df: pd.DataFrame) -> pd.DataFrame:

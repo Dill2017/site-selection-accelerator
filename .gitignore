@@ -22,6 +22,7 @@ Thumbs.db
 
 # Databricks
 .databricks/
+.databricks-resources.json
 
 # Training logs
 lightning_logs/

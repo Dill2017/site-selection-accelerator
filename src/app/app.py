@@ -22,8 +22,14 @@ from brand_search import (
     find_competitors_in_similar_cells,
     infer_location_categories,
 )
-from config import CATEGORY_GROUPS, DEFAULT_H3_RESOLUTION, H3_RESOLUTIONS
-from embeddings import run_embedding_pipeline
+from config import (
+    ALL_BUILDING_CATEGORIES,
+    ALL_FEATURE_GROUPS,
+    CATEGORY_GROUPS,
+    DEFAULT_H3_RESOLUTION,
+    H3_RESOLUTIONS,
+)
+from embeddings import normalise_buildings, run_embedding_pipeline
 from explainability import (
     build_brand_profile,
     build_fingerprint_df,
@@ -34,6 +40,8 @@ from explainability import (
 from map_viz import build_map
 from pipeline import (
     build_count_vectors,
+    get_buildings_around_points,
+    get_buildings_with_h3,
     get_cities,
     get_city_polygon,
     get_countries,
@@ -149,6 +157,15 @@ with st.sidebar:
         )
     else:
         beta = 0.0
+
+    # -- Building features ----------------------------------------------------
+    st.subheader("Building Features")
+    include_buildings = st.checkbox(
+        "Include building data",
+        value=True,
+        help="Enrich embeddings with building type and height data "
+        "(residential, commercial, industrial, etc.).",
+    )
 
     run_button = st.button("🔍 Find Opportunities", type="primary", use_container_width=True)
 
@@ -298,18 +315,57 @@ if run_button:
         pois_df = city_pois_df
 
     n_pois = len(pois_df)
-    progress.progress(40, text=f"Found {n_pois:,} POIs across {len(selected_cats)} categories.")
+    progress.progress(30, text=f"Found {n_pois:,} POIs across {len(selected_cats)} categories.")
 
     if pois_df.empty:
         st.warning("No POIs found for the selected categories in this city.")
         st.stop()
 
-    progress.progress(45, text="Building count vectors…")
-    count_vectors = build_count_vectors(pois_df)
+    # -- Fetch buildings (optional) ------------------------------------------
+    buildings_features = pd.DataFrame()
+    if include_buildings:
+        progress.progress(32, text="Querying buildings…")
+        city_bldg_df = get_buildings_with_h3(country, city, resolution)
+
+        if brand_outside:
+            brand_ctx_bldg = get_buildings_around_points(
+                brand_outside, resolution, k_ring=2,
+            )
+            if not brand_ctx_bldg.empty:
+                city_bldg_df = pd.concat(
+                    [city_bldg_df, brand_ctx_bldg], ignore_index=True,
+                ).drop_duplicates(subset=["building_id"])
+
+        if not city_bldg_df.empty:
+            buildings_features = normalise_buildings(city_bldg_df)
+            progress.progress(
+                38,
+                text=f"Found {len(city_bldg_df):,} buildings "
+                f"({len(buildings_features):,} feature rows).",
+            )
+
+    # -- Merge POIs + buildings into unified features table -------------------
+    poi_features = pois_df[["poi_id", "category", "lon", "lat", "h3_cell"]].copy()
+    poi_features = poi_features.rename(columns={"poi_id": "feature_id"})
+
+    if not buildings_features.empty:
+        features_df = pd.concat(
+            [poi_features, buildings_features], ignore_index=True,
+        )
+    else:
+        features_df = poi_features
+
+    all_cats = list(selected_cats)
+    if include_buildings and not buildings_features.empty:
+        present_bldg_cats = sorted(buildings_features["category"].unique())
+        all_cats = all_cats + present_bldg_cats
+
+    progress.progress(40, text="Building count vectors…")
+    count_vectors = build_count_vectors(features_df)
 
     progress.progress(50, text="Training Hex2Vec (this may take a minute)…")
     embeddings = run_embedding_pipeline(
-        h3_cells_df, pois_df, selected_cats,
+        h3_cells_df, features_df, all_cats,
     )
 
     progress.progress(80, text="Computing similarity scores…")
@@ -402,18 +458,35 @@ if True:
     # ── Brand Location Profile ──────────────────────────────────────────────
     st.subheader("Brand Location Profile")
     st.caption(
-        "Average POI category counts across your brand's existing locations. "
+        "Average feature distribution across your brand's existing locations, "
+        "normalised independently for POIs and buildings. "
         "This is the baseline the similarity scores are compared against."
     )
 
     avg_nonzero = brand_avg[brand_avg > 0].sort_values(ascending=False)
     if not avg_nonzero.empty:
         avg_df = avg_nonzero.reset_index()
-        avg_df.columns = ["Category", "Avg Count"]
-        avg_df["Category"] = avg_df["Category"].str.replace("_", " ").str.title()
+        avg_df.columns = ["category_raw", "Avg Count"]
 
+        _bldg_set = set(ALL_BUILDING_CATEGORIES)
+        avg_df["Feature Type"] = avg_df["category_raw"].apply(
+            lambda c: "Building" if c in _bldg_set else "POI"
+        )
+        for ft in ("POI", "Building"):
+            mask = avg_df["Feature Type"] == ft
+            ft_total = avg_df.loc[mask, "Avg Count"].sum()
+            if ft_total > 0:
+                avg_df.loc[mask, "% within Type"] = (
+                    (avg_df.loc[mask, "Avg Count"] / ft_total * 100).round(1)
+                )
+            else:
+                avg_df.loc[mask, "% within Type"] = 0.0
+
+        avg_df["Category"] = (
+            avg_df["category_raw"].str.replace("_", " ").str.title()
+        )
         group_lookup = {}
-        for grp, cats in CATEGORY_GROUPS.items():
+        for grp, cats in ALL_FEATURE_GROUPS.items():
             for c in cats:
                 group_lookup[c.replace("_", " ").title()] = grp
         avg_df["Group"] = avg_df["Category"].map(group_lookup).fillna("Other")
@@ -422,20 +495,24 @@ if True:
             alt.Chart(avg_df)
             .mark_bar()
             .encode(
-                x=alt.X("Avg Count:Q", title="Average POI Count"),
+                x=alt.X("% within Type:Q", title="% within Feature Type"),
                 y=alt.Y("Category:N", sort="-x", title=None),
                 color=alt.Color(
                     "Group:N",
                     title="Category Group",
                     legend=alt.Legend(orient="bottom"),
                 ),
-                tooltip=["Category", "Avg Count", "Group"],
+                tooltip=["Category", "Group", "Feature Type",
+                          alt.Tooltip("% within Type:Q", format=".1f"),
+                          alt.Tooltip("Avg Count:Q", format=".1f")],
             )
             .properties(height=max(len(avg_df) * 22, 200))
+            .facet(row=alt.Row("Feature Type:N", title=None))
+            .resolve_scale(y="independent")
         )
         st.altair_chart(avg_chart, use_container_width=True)
     else:
-        st.info("No POI data found for the brand location cells.")
+        st.info("No feature data found for the brand location cells.")
 
     with st.expander("Individual Brand Location Breakdown"):
         brand_cells_df = brand_profile["cells"]
@@ -586,8 +663,9 @@ if True:
         else:
             st.markdown("#### Category Fingerprint")
             st.caption(
-                "Compare the full POI category distribution of this location "
-                "against the brand average. Similar shapes indicate a strong vibe match."
+                "Compare the feature distribution of this location against "
+                "the brand average. Percentages are normalised within each "
+                "feature type (POI / Building) independently."
             )
 
             col_chart, col_metric = st.columns([1, 1])
@@ -601,21 +679,21 @@ if True:
             with col_metric:
                 metric = st.radio(
                     "Metric",
-                    ["Counts", "% of Total"],
+                    ["Counts", "% within Type"],
                     horizontal=True,
                     key="fp_metric",
                 )
 
-            if metric == "% of Total":
+            if metric == "% within Type":
                 val_col = "Value (%)"
-                y_title = "% of Total POIs"
+                y_title = "% within Feature Type"
                 fp_plot = fingerprint.rename(columns={
                     "This Location (%)": "This Location",
                     "Brand Average (%)": "Brand Average",
                 })[["Category", "Group", "This Location", "Brand Average"]]
             else:
                 val_col = "Value"
-                y_title = "POI Count"
+                y_title = "Feature Count"
                 fp_plot = fingerprint[["Category", "Group", "This Location", "Brand Average"]]
 
             cat_order = fp_plot["Category"].tolist()

@@ -9,6 +9,7 @@ _SCHEMA = os.getenv("GOLD_SCHEMA", "geospatial")
 GOLD_CITIES_TABLE = f"{_CATALOG}.{_SCHEMA}.gold_cities"
 GOLD_PLACES_TABLE = f"{_CATALOG}.{_SCHEMA}.gold_places"
 GOLD_PLACES_ENRICHED = f"{_CATALOG}.{_SCHEMA}.gold_places_enriched"
+GOLD_BUILDINGS_TABLE = f"{_CATALOG}.{_SCHEMA}.gold_buildings"
 APP_CONFIG_TABLE = f"{_CATALOG}.{_SCHEMA}.app_config"
 
 _log = logging.getLogger(__name__)
@@ -87,6 +88,30 @@ CATEGORY_GROUPS: dict[str, list[str]] = {
 ALL_CATEGORIES: list[str] = [
     cat for cats in CATEGORY_GROUPS.values() for cat in cats
 ]
+
+BUILDING_CATEGORY_GROUPS: dict[str, list[str]] = {
+    "Residential": ["bldg_residential"],
+    "Commercial Buildings": ["bldg_commercial"],
+    "Industrial": ["bldg_industrial"],
+    "Agricultural": ["bldg_agricultural"],
+    "Transportation": ["bldg_transportation"],
+    "Other Buildings": ["bldg_outbuilding", "bldg_other"],
+    "Height Profile": [
+        "height_low_rise",
+        "height_mid_rise",
+        "height_high_rise",
+        "height_skyscraper",
+    ],
+}
+
+ALL_BUILDING_CATEGORIES: list[str] = [
+    cat for cats in BUILDING_CATEGORY_GROUPS.values() for cat in cats
+]
+
+ALL_FEATURE_GROUPS: dict[str, list[str]] = {
+    **CATEGORY_GROUPS,
+    **BUILDING_CATEGORY_GROUPS,
+}
 
 H3_RESOLUTIONS = [7, 8, 9, 10]
 DEFAULT_H3_RESOLUTION = 9

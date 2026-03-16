@@ -4,8 +4,9 @@ A Databricks solution accelerator that helps retail operations teams identify
 **whitespace expansion opportunities** for their brand. Users can search by
 **brand name** (e.g. "Starbucks", "Premier Inn") or enter coordinates directly.
 The app discovers existing locations via **Databricks Genie** (natural language
-to SQL), builds a geospatial profile using **Hex2Vec** embeddings, scores every
-H3 hexagonal cell in the target city by neighbourhood similarity, and applies a
+to SQL), builds a geospatial profile using **Hex2Vec** embeddings from both
+**POI categories** and **building data** (type, height), scores every H3
+hexagonal cell in the target city by neighbourhood similarity, and applies a
 **competition penalty** based on co-located competitors — surfacing the areas
 that best match the brand's surroundings but aren't yet saturated.
 
@@ -49,14 +50,15 @@ enabling cross-city expansion analysis.
 │  │  1. City polygon from gold_cities    (real boundary WKT)      │    │
 │  │  2. H3 tessellation via h3_polyfillash3 (polygon fill)       │    │
 │  │  3. POI lookup from gold_places (polygon-filtered via H3)    │    │
-│  │  4. Cross-city brand neighbourhood   (for external brands)   │    │
+│  │  4. Building lookup from gold_buildings (bbox + H3 join)     │    │
+│  │  5. Cross-city brand neighbourhood   (for external brands)   │    │
 │  └──────────────────────────┬───────────────────────────────────┘    │
 │                             ▼                                        │
 │  ┌──────────────────────────────────────────────────────────────┐    │
 │  │            SRAI Hex2Vec Embeddings (embeddings.py)           │    │
 │  │                                                              │    │
 │  │  • regions_gdf from H3 polygons                              │    │
-│  │  • features_gdf with one-hot POI categories                  │    │
+│  │  • features_gdf with one-hot POI + building categories       │    │
 │  │  • joint_gdf from DBSQL H3 assignment                        │    │
 │  │  • Hex2VecEmbedder.fit_transform()                           │    │
 │  └──────────────────────────┬───────────────────────────────────┘    │
@@ -109,7 +111,8 @@ enabling cross-city expansion analysis.
 │  • gold_places    │ │  • gold_places   │ │   h3_polyfillash3    │
 │  • gold_places    │ │    _enriched     │ │   h3_longlatash3     │
 │    _enriched      │ │  • gold_cities   │ │   h3_h3tostring      │
-│  • app_config     │ │                  │ │   h3_centerasgeojson │
+│  • gold_buildings │ │                  │ │   h3_centerasgeojson │
+│  • app_config     │ │                  │ │                      │
 └──────────────────┘ └──────────────────┘ └──────────────────────┘
          ▲
 ┌───────────────────────┐
@@ -119,6 +122,7 @@ enabling cross-city expansion analysis.
 │  CARTO Overture Maps   │
 │  → gold_cities         │
 │  → gold_places         │
+│  → gold_buildings      │
 │  → gold_places_enriched│
 │  → Genie Space setup   │
 └───────────────────────┘
@@ -134,7 +138,7 @@ enabling cross-city expansion analysis.
 |---|---|
 | Databricks workspace | With access to a SQL Warehouse |
 | Databricks CLI | v0.239.0+ (for Asset Bundle deployment) |
-| CARTO Overture Maps catalogs | `carto_overture_maps_places`, `carto_overture_maps_divisions` mounted via Delta Sharing |
+| CARTO Overture Maps catalogs | `carto_overture_maps_places`, `carto_overture_maps_divisions`, `carto_overture_maps_buildings` mounted via Delta Sharing |
 | Python | 3.11+ (used by the Databricks App runtime) |
 
 ### 1. Clone the repository
@@ -193,8 +197,9 @@ databricks bundle deploy
 
 ### 5. Run the ETL job to populate gold tables
 
-This creates `gold_cities`, `gold_places`, and `gold_places_enriched` tables
-in your catalog/schema, then provisions a Genie Space with spatial instructions.
+This creates `gold_cities`, `gold_places`, `gold_buildings`, and
+`gold_places_enriched` tables in your catalog/schema, then provisions a Genie
+Space with spatial instructions.
 
 ```bash
 databricks bundle run geospatial_etl_job
@@ -222,6 +227,7 @@ Overture Maps data into gold tables and provisions the Genie Space:
 |---|---|---|
 | `gold_cities` | `division` + `division_area` | Joins city metadata with polygons, extracts WKT geometry, and computes bounding boxes. Uses a multi-level fallback: locality area first, then `ST_Union` of all same-name region/county/neighborhood/macrohood areas (covers city-states like Hamburg/Berlin and metro areas like Manchester/Birmingham), finally a synthetic bbox polygon |
 | `gold_places` | `place` | Extracts lon/lat from WKB geometry, flattens `categories.primary` and `addresses[0].freeform`, filters to supported POI categories |
+| `gold_buildings` | `building` | Extracts centroids from footprint polygons, derives `building_category` (prefixed subtype/class, e.g. `bldg_residential`), `height_bin` (low/mid/high-rise/skyscraper), pre-computes H3 cell at resolution 9, Z-ordered by bbox for fast spatial scans |
 | `gold_places_enriched` | `place` | Comprehensive POI table with flattened names, categories, brands, addresses, coordinates, and bounding boxes for Genie and competition queries |
 | `app_config` | — | Key-value store for `GENIE_SPACE_ID` and other runtime config |
 
@@ -243,6 +249,8 @@ The Streamlit sidebar collects:
   (defaults to GB / London).
 - **POI categories**: multi-select grouped by theme (Food & Drink, Shopping,
   Services, Entertainment, Commercial).
+- **Building features toggle**: include/exclude building type and height data
+  in the embeddings (enabled by default).
 - **Competition sensitivity (beta)**: slider from 0 to 1 controlling how
   heavily competition penalises the opportunity score.
 
@@ -273,12 +281,20 @@ When brand locations are outside the target city:
 Using the [SRAI](https://kraina-ai.github.io/srai/) library:
 
 1. Builds a `regions_gdf` of H3 cell polygons (via the `h3` Python library).
-2. Builds a `features_gdf` of POI point geometries with one-hot encoded
-   category columns.
-3. Constructs a `joint_gdf` (region-feature mapping) directly from the DBSQL
+2. Fetches buildings from `gold_buildings` and normalises each into up to two
+   feature rows: one for building type (`bldg_residential`, `bldg_commercial`,
+   etc.) and one for height bin (`height_low_rise`, `height_mid_rise`, etc.).
+3. Merges POIs and buildings into a unified features table with generic
+   `feature_id` / `category` columns. Builds a `features_gdf` with one-hot
+   encoded category columns spanning both POI and building categories.
+4. Constructs a `joint_gdf` (region-feature mapping) directly from the DBSQL
    H3 assignment.
-4. Trains a **Hex2VecEmbedder** (encoder sizes `[15, 10]`, 5 epochs, CPU)
+5. Trains a **Hex2VecEmbedder** (encoder sizes `[15, 10]`, 5 epochs, CPU)
    on the H3 neighbourhood graph to produce dense embeddings per cell.
+
+Building data enriches the embeddings with land-use signals (residential vs.
+commercial vs. industrial) and urbanisation density (height profile) that POIs
+alone cannot capture.
 
 > **Deep dive:** See [HEX2VEC_EXPLAINER.md](HEX2VEC_EXPLAINER.md) for a
 > full explanation of how Hex2Vec works.
@@ -329,17 +345,18 @@ Rather than showing only a similarity percentage, the app provides interpretable
 explanations using the raw POI count vectors:
 
 - **Brand Location Profile** — displayed before the map as a horizontal bar
-  chart of average POI counts per category across all brand cells, colour-coded
-  by category group (Food & Drink, Shopping, etc.).
+  chart of average feature distributions across all brand cells, faceted by
+  feature type (POI vs. Building) with independent scales. Values are shown as
+  **% within type** so building counts don't overshadow POI counts.
 - **Enhanced tooltips** — hovering any hexagon on the map shows the top 4
   categories in that cell compared to the brand average.
 - **Category Fingerprint** — clicking any row in the Top 20 table reveals a
-  fingerprint chart showing **all** POI categories (not just non-zero ones) for
-  the selected location versus the brand average. Users can toggle between
-  **line chart** (to compare distribution shapes) and **bar chart** modes, and
-  between raw **counts** and **% of total** (normalised) views. The normalised
-  view lets you compare the shape of the distribution even when absolute POI
-  counts differ significantly between the location and the brand profile.
+  fingerprint chart showing **all** feature categories (POI + building) for the
+  selected location versus the brand average. Users can toggle between **line
+  chart** (to compare distribution shapes) and **bar chart** modes, and between
+  raw **counts** and **% within type** (normalised) views. The normalised view
+  computes percentages independently for POIs and buildings, so neither type
+  dominates the chart.
 
 ---
 
@@ -374,6 +391,7 @@ site_selection_accelerator/
             ├── setup_schema.sql      # CREATE SCHEMA IF NOT EXISTS
             ├── gold_cities.sql       # CTAS: cities + ST_Union'd polygons + bboxes
             ├── gold_places.sql       # CTAS: flattened POIs with extracted coords
+            ├── gold_buildings.sql    # CTAS: building centroids + categories + H3 + ZORDER
             └── gold_places_enriched.sql  # CTAS: comprehensive POI table for Genie
 ```
 
@@ -416,6 +434,9 @@ site_selection_accelerator/
   the ETL job.
 - **Add new POI categories** — edit `CATEGORY_GROUPS` in `config.py` and the
   `WHERE` clause in `gold_places.sql`, then re-run the ETL job.
+- **Add new building categories** — edit `BUILDING_CATEGORY_GROUPS` in
+  `config.py` and the `building_category`/`height_bin` logic in
+  `gold_buildings.sql`, then re-run the ETL job.
 - **Refresh gold tables** — run `databricks bundle run geospatial_etl_job`
   whenever the upstream CARTO data updates. This also updates the Genie Space
   instructions.

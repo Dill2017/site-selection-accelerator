@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from config import CATEGORY_GROUPS
+from config import ALL_BUILDING_CATEGORIES, ALL_FEATURE_GROUPS
 
 
 def build_brand_profile(
@@ -62,7 +62,7 @@ def explain_opportunity(
     ]
 
     group_summary = {}
-    for group, cats in CATEGORY_GROUPS.items():
+    for group, cats in ALL_FEATURE_GROUPS.items():
         cats_present = [c for c in cats if c in diff.index]
         if cats_present:
             group_summary[group] = round(diff[cats_present].mean(), 2)
@@ -130,7 +130,7 @@ def build_fingerprint_df(
 
     group_lookup: dict[str, str] = {}
     group_order: dict[str, int] = {}
-    for idx, (grp, cats) in enumerate(CATEGORY_GROUPS.items()):
+    for idx, (grp, cats) in enumerate(ALL_FEATURE_GROUPS.items()):
         group_order[grp] = idx
         for c in cats:
             group_lookup[c] = grp
@@ -143,6 +143,11 @@ def build_fingerprint_df(
         "Brand Average": [float(brand_vals[c]) for c in all_cats],
     })
 
+    _bldg_set = set(ALL_BUILDING_CATEGORIES)
+    df["Feature Type"] = df["category_raw"].apply(
+        lambda c: "Building" if c in _bldg_set else "POI"
+    )
+
     df["_group_order"] = df["Group"].map(
         lambda g: group_order.get(g, len(group_order))
     )
@@ -150,16 +155,18 @@ def build_fingerprint_df(
         ["_group_order", "Category"], ascending=True
     ).drop(columns="_group_order").reset_index(drop=True)
 
-    cell_total = df["This Location"].sum()
-    brand_total = df["Brand Average"].sum()
-    df["This Location (%)"] = (
-        (df["This Location"] / cell_total * 100).round(1) if cell_total > 0
-        else 0.0
-    )
-    df["Brand Average (%)"] = (
-        (df["Brand Average"] / brand_total * 100).round(1) if brand_total > 0
-        else 0.0
-    )
+    for col, pct_col in [
+        ("This Location", "This Location (%)"),
+        ("Brand Average", "Brand Average (%)"),
+    ]:
+        df[pct_col] = 0.0
+        for ft in ("POI", "Building"):
+            mask = df["Feature Type"] == ft
+            type_total = df.loc[mask, col].sum()
+            if type_total > 0:
+                df.loc[mask, pct_col] = (
+                    (df.loc[mask, col] / type_total * 100).round(1)
+                )
 
     return df
 
