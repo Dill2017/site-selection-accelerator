@@ -46,9 +46,9 @@ enabling cross-city expansion analysis.
 │  ┌──────────────────────────────────────────────────────────────┐    │
 │  │         DBSQL Queries on Gold Tables (pipeline.py)           │    │
 │  │                                                              │    │
-│  │  1. City polygon from gold_cities    (pre-computed WKT)      │    │
-│  │  2. H3 tessellation via h3_polyfillash3 (fast polygon fill)  │    │
-│  │  3. POI lookup from gold_places          (flattened CARTO)   │    │
+│  │  1. City polygon from gold_cities    (real boundary WKT)      │    │
+│  │  2. H3 tessellation via h3_polyfillash3 (polygon fill)       │    │
+│  │  3. POI lookup from gold_places (polygon-filtered via H3)    │    │
 │  │  4. Cross-city brand neighbourhood   (for external brands)   │    │
 │  └──────────────────────────┬───────────────────────────────────┘    │
 │                             ▼                                        │
@@ -89,6 +89,7 @@ enabling cross-city expansion analysis.
 │  │             pydeck Map Visualisation (map_viz.py)            │    │
 │  │                                                              │    │
 │  │  • CARTO basemap                                             │    │
+│  │  • GeoJsonLayer — city polygon boundary outline              │    │
 │  │  • H3HexagonLayer — similarity heatmap                       │    │
 │  │  • ScatterplotLayer — existing locations (blue, density      │    │
 │  │    gradient: light→dark by brand count per cell)             │    │
@@ -219,7 +220,7 @@ Overture Maps data into gold tables and provisions the Genie Space:
 
 | Gold Table | Source | What it does |
 |---|---|---|
-| `gold_cities` | `division` + `division_area` | Joins city metadata with polygons, extracts WKT geometry, computes bounding boxes, generates fallback rectangular polygons for cities without geometry |
+| `gold_cities` | `division` + `division_area` | Joins city metadata with polygons, extracts WKT geometry, and computes bounding boxes. Uses a multi-level fallback: locality area first, then `ST_Union` of all same-name region/county/neighborhood/macrohood areas (covers city-states like Hamburg/Berlin and metro areas like Manchester/Birmingham), finally a synthetic bbox polygon |
 | `gold_places` | `place` | Extracts lon/lat from WKB geometry, flattens `categories.primary` and `addresses[0].freeform`, filters to supported POI categories |
 | `gold_places_enriched` | `place` | Comprehensive POI table with flattened names, categories, brands, addresses, coordinates, and bounding boxes for Genie and competition queries |
 | `app_config` | — | Key-value store for `GENIE_SPACE_ID` and other runtime config |
@@ -306,6 +307,7 @@ basemap:
 
 | Layer | Description |
 |---|---|
+| **GeoJsonLayer** | City polygon boundary outline (when real polygon data is available) |
 | **H3HexagonLayer** | All candidate cells coloured by similarity score (red = high, blue = low) |
 | **ScatterplotLayer (blue)** | Existing brand locations snapped to H3 cell centres; colour gradient from light blue (1 location) to dark navy (max locations per cell). Pickable with brand count tooltip. |
 | **ScatterplotLayer (green)** | Top 2% opportunity locations by opportunity score + POI density |
@@ -359,18 +361,18 @@ site_selection_accelerator/
     │   ├── .env                      # Local dev env vars (not committed)
     │   ├── app.py                    # Streamlit UI + orchestration
     │   ├── config.py                 # Gold table refs, categories, Genie Space ID
-    │   ├── db.py                     # DBSQL connection (cached, auto-reconnect, PAT/SP)
-    │   ├── pipeline.py               # DBSQL queries on gold tables + cross-city logic
+    │   ├── db.py                     # SQL execution via Databricks SDK Statement API
+    │   ├── pipeline.py               # DBSQL queries on gold tables + polygon-aware POI filter
     │   ├── embeddings.py             # SRAI Hex2Vec embedding pipeline
     │   ├── similarity.py             # Cosine similarity + opportunity scoring
     │   ├── brand_search.py           # Brand discovery (Genie) + competition analysis
     │   ├── explainability.py         # Score explainability + competition detail
-    │   └── map_viz.py                # pydeck map construction (similarity heatmap)
+    │   └── map_viz.py                # pydeck map (heatmap + city boundary outline)
     └── pipeline/
         ├── setup_genie_space.py      # Genie Space provisioning (create/update/persist)
         └── transformations/
             ├── setup_schema.sql      # CREATE SCHEMA IF NOT EXISTS
-            ├── gold_cities.sql       # CTAS: flattened cities + polygons + bboxes
+            ├── gold_cities.sql       # CTAS: cities + ST_Union'd polygons + bboxes
             ├── gold_places.sql       # CTAS: flattened POIs with extracted coords
             └── gold_places_enriched.sql  # CTAS: comprehensive POI table for Genie
 ```
@@ -387,7 +389,9 @@ site_selection_accelerator/
 | `h3_longlatash3(lon, lat, res)` | Assign a point to its H3 cell |
 | `h3_h3tostring(cell)` | Convert H3 BIGINT to hex string |
 | `h3_centerasgeojson(cell)` | Get the centre point of an H3 cell |
-| `ST_GeomFromText(wkt)` | Parse WKT into geometry (used in gold_cities ETL) |
+| `ST_GeomFromWKB(wkb)` | Parse WKB into geometry (used in gold_cities ETL) |
+| `ST_Union(geom1, geom2)` | Merge two geometries into one (used to combine multi-level polygons) |
+| `ST_AsText(geom)` | Convert geometry to WKT string |
 
 ### Python Libraries
 
@@ -400,8 +404,7 @@ site_selection_accelerator/
 | `altair` | Vega-Lite charts for brand profile and explainability panels |
 | `pydeck` | Deck.gl map rendering in Streamlit |
 | `geopy` | Optional address geocoding via Nominatim |
-| `databricks-sql-connector` | DBSQL query execution |
-| `databricks-sdk` | Workspace auth, Genie API, Foundation Model API |
+| `databricks-sdk` | Workspace auth, SQL Statement Execution API, Genie API, Foundation Model API |
 | `python-dotenv` | Load `.env` variables for local development |
 
 ---

@@ -35,6 +35,7 @@ from map_viz import build_map
 from pipeline import (
     build_count_vectors,
     get_cities,
+    get_city_polygon,
     get_countries,
     get_nearest_address_per_cell,
     get_pois_around_points,
@@ -250,6 +251,11 @@ if run_button:
     progress = st.progress(0, text="Tessellating city with H3…")
 
     city_h3_cells_df = tessellate_city(country, city, resolution)
+    city_geo = get_city_polygon(country, city)
+    _has_polygon = city_geo.get("has_polygon")
+    if isinstance(_has_polygon, str):
+        _has_polygon = _has_polygon.lower() == "true"
+    city_polygon_wkt = city_geo["geom_wkt"] if _has_polygon else None
     n_cells = len(city_h3_cells_df)
     progress.progress(15, text=f"City tessellated into {n_cells:,} H3 cells.")
 
@@ -358,6 +364,7 @@ if run_button:
         count_vectors=count_vectors,
         brand_avg=brand_avg,
         competitor_pois=competitor_pois,
+        city_polygon_wkt=city_polygon_wkt,
     )
 
     progress.progress(100, text="Done!")

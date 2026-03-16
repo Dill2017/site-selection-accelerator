@@ -1,44 +1,95 @@
 -- Pre-processed city lookup with polygons, centres, and bounding boxes.
 -- Joins divisions + division_areas so the app never touches raw WKB geometry.
+-- Polygon resolution: locality area first, then ST_Union of all same-name
+-- region/county/neighborhood/macrohood areas (covers city-states and metro areas).
 CREATE OR REPLACE TABLE dilshad_shawki.geospatial.gold_cities AS
+WITH localities AS (
+    SELECT
+        d.id,
+        d.country,
+        d.names.primary  AS city_name,
+        d.bbox
+    FROM carto_overture_maps_divisions.carto.division d
+    WHERE d.subtype = 'locality'
+        AND d.class IN ('city', 'town')
+        AND d.country IS NOT NULL
+        AND d.names.primary IS NOT NULL
+),
+locality_area AS (
+    SELECT l.id, FIRST(da.geom) AS geom
+    FROM localities l
+    INNER JOIN carto_overture_maps_divisions.carto.division_area da
+        ON da.division_id = l.id
+    GROUP BY l.id
+),
+cities_needing_fallback AS (
+    SELECT DISTINCT l.city_name, l.country
+    FROM localities l
+    LEFT JOIN locality_area la ON la.id = l.id
+    WHERE la.geom IS NULL
+),
+fallback_area AS (
+    SELECT
+        cn.city_name,
+        cn.country,
+        REDUCE(
+            COLLECT_LIST(da.geom),
+            CAST(NULL AS BINARY),
+            (acc, x) -> CASE
+                WHEN acc IS NULL THEN x
+                ELSE ST_AsBinary(ST_Union(ST_GeomFromWKB(acc), ST_GeomFromWKB(x)))
+            END,
+            acc -> acc
+        ) AS geom
+    FROM cities_needing_fallback cn
+    INNER JOIN carto_overture_maps_divisions.carto.division d
+        ON d.names.primary = cn.city_name AND d.country = cn.country
+    INNER JOIN carto_overture_maps_divisions.carto.division_area da
+        ON da.division_id = d.id
+    WHERE d.subtype IN ('region', 'county', 'neighborhood', 'macrohood')
+    GROUP BY cn.city_name, cn.country
+),
+resolved AS (
+    SELECT
+        l.*,
+        COALESCE(la.geom, fa.geom) AS geom
+    FROM localities l
+    LEFT JOIN locality_area la ON la.id = l.id
+    LEFT JOIN fallback_area fa
+        ON fa.city_name = l.city_name AND fa.country = l.country
+)
 SELECT
-    d.country,
-    d.names.primary                                         AS city_name,
-    CAST(d.bbox.xmin AS DOUBLE)                             AS center_lon,
-    CAST(d.bbox.ymin AS DOUBLE)                             AS center_lat,
-    da.division_id IS NOT NULL                              AS has_polygon,
+    r.country,
+    r.city_name,
+    CAST(r.bbox.xmin AS DOUBLE)                              AS center_lon,
+    CAST(r.bbox.ymin AS DOUBLE)                              AS center_lat,
+    r.geom IS NOT NULL                                       AS has_polygon,
     COALESCE(
-        ST_AsText(ST_GeomFromWKB(da.geom)),
+        ST_AsText(ST_GeomFromWKB(r.geom)),
         CONCAT(
             'POLYGON((',
-            CAST(d.bbox.xmin - 0.15 AS STRING), ' ', CAST(d.bbox.ymin - 0.15 AS STRING), ', ',
-            CAST(d.bbox.xmin + 0.15 AS STRING), ' ', CAST(d.bbox.ymin - 0.15 AS STRING), ', ',
-            CAST(d.bbox.xmin + 0.15 AS STRING), ' ', CAST(d.bbox.ymin + 0.15 AS STRING), ', ',
-            CAST(d.bbox.xmin - 0.15 AS STRING), ' ', CAST(d.bbox.ymin + 0.15 AS STRING), ', ',
-            CAST(d.bbox.xmin - 0.15 AS STRING), ' ', CAST(d.bbox.ymin - 0.15 AS STRING),
+            CAST(r.bbox.xmin - 0.15 AS STRING), ' ', CAST(r.bbox.ymin - 0.15 AS STRING), ', ',
+            CAST(r.bbox.xmin + 0.15 AS STRING), ' ', CAST(r.bbox.ymin - 0.15 AS STRING), ', ',
+            CAST(r.bbox.xmin + 0.15 AS STRING), ' ', CAST(r.bbox.ymin + 0.15 AS STRING), ', ',
+            CAST(r.bbox.xmin - 0.15 AS STRING), ' ', CAST(r.bbox.ymin + 0.15 AS STRING), ', ',
+            CAST(r.bbox.xmin - 0.15 AS STRING), ' ', CAST(r.bbox.ymin - 0.15 AS STRING),
             '))'
         )
-    )                                                       AS geom_wkt,
+    )                                                        AS geom_wkt,
     COALESCE(
-        CAST(ST_XMin(ST_GeomFromWKB(da.geom)) AS DOUBLE),
-        CAST(d.bbox.xmin - 0.15 AS DOUBLE)
-    )                                                       AS bbox_xmin,
+        CAST(ST_XMin(ST_GeomFromWKB(r.geom)) AS DOUBLE),
+        CAST(r.bbox.xmin - 0.15 AS DOUBLE)
+    )                                                        AS bbox_xmin,
     COALESCE(
-        CAST(ST_XMax(ST_GeomFromWKB(da.geom)) AS DOUBLE),
-        CAST(d.bbox.xmin + 0.15 AS DOUBLE)
-    )                                                       AS bbox_xmax,
+        CAST(ST_XMax(ST_GeomFromWKB(r.geom)) AS DOUBLE),
+        CAST(r.bbox.xmin + 0.15 AS DOUBLE)
+    )                                                        AS bbox_xmax,
     COALESCE(
-        CAST(ST_YMin(ST_GeomFromWKB(da.geom)) AS DOUBLE),
-        CAST(d.bbox.ymin - 0.15 AS DOUBLE)
-    )                                                       AS bbox_ymin,
+        CAST(ST_YMin(ST_GeomFromWKB(r.geom)) AS DOUBLE),
+        CAST(r.bbox.ymin - 0.15 AS DOUBLE)
+    )                                                        AS bbox_ymin,
     COALESCE(
-        CAST(ST_YMax(ST_GeomFromWKB(da.geom)) AS DOUBLE),
-        CAST(d.bbox.ymin + 0.15 AS DOUBLE)
-    )                                                       AS bbox_ymax
-FROM carto_overture_maps_divisions.carto.division d
-LEFT JOIN carto_overture_maps_divisions.carto.division_area da
-    ON da.division_id = d.id
-WHERE d.subtype = 'locality'
-    AND d.class IN ('city', 'town')
-    AND d.country IS NOT NULL
-    AND d.names.primary IS NOT NULL
+        CAST(ST_YMax(ST_GeomFromWKB(r.geom)) AS DOUBLE),
+        CAST(r.bbox.ymin + 0.15 AS DOUBLE)
+    )                                                        AS bbox_ymax
+FROM resolved r

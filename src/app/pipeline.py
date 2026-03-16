@@ -43,14 +43,13 @@ def get_cities(country: str) -> list[str]:
 # ── Core pipeline queries ───────────────────────────────────────────────────
 
 
-def get_city_bbox(country: str, city: str) -> dict:
-    """Return the bounding box for a city from the gold table.
+def get_city_polygon(country: str, city: str) -> dict:
+    """Return city geometry metadata from the gold table.
 
-    Returns dict with keys xmin, xmax, ymin, ymax.
+    Returns dict with keys: geom_wkt, has_polygon.
     """
     query = f"""
-        SELECT bbox_xmin AS xmin, bbox_xmax AS xmax,
-               bbox_ymin AS ymin, bbox_ymax AS ymax
+        SELECT geom_wkt, has_polygon
         FROM {GOLD_CITIES_TABLE}
         WHERE country = '{country}' AND city_name = '{city}'
         LIMIT 1
@@ -64,7 +63,8 @@ def get_city_bbox(country: str, city: str) -> dict:
 def tessellate_city(country: str, city: str, resolution: int) -> pd.DataFrame:
     """H3-tessellate a city polygon and return cell IDs with centre coordinates.
 
-    The polygon (real or fallback bbox) is pre-computed in gold_cities.
+    Uses the real polygon boundary from gold_cities (geom_wkt) so that
+    H3 cells follow the actual city shape rather than a bounding box.
 
     Returns DataFrame with columns: h3_cell, center_lat, center_lon
     """
@@ -94,28 +94,46 @@ def get_pois_with_h3(
     resolution: int,
     categories: list[str],
 ) -> pd.DataFrame:
-    """Extract POIs inside the city bbox, assign each to an H3 cell.
+    """Extract POIs inside the city polygon, assign each to an H3 cell.
+
+    Uses a bbox pre-filter for scan efficiency, then restricts to H3
+    cells produced by h3_polyfillash3 on the actual city polygon.  This
+    ensures coverage follows the real city boundary while keeping the
+    query fast.
 
     Returns DataFrame with columns:
         poi_id, category, lon, lat, address, h3_cell
     """
-    bbox = get_city_bbox(country, city)
-
     cat_list = ", ".join(f"'{c}'" for c in categories)
     query = f"""
-        SELECT
-            poi_id,
-            category,
-            lon,
-            lat,
-            address,
-            h3_longlatash3(lon, lat, {resolution}) AS h3_cell
-        FROM {GOLD_PLACES_TABLE}
-        WHERE bbox_xmin >= {bbox['xmin']}
-          AND bbox_xmax <= {bbox['xmax']}
-          AND bbox_ymin >= {bbox['ymin']}
-          AND bbox_ymax <= {bbox['ymax']}
-          AND category IN ({cat_list})
+        WITH city AS (
+            SELECT geom_wkt,
+                   bbox_xmin, bbox_xmax, bbox_ymin, bbox_ymax
+            FROM {GOLD_CITIES_TABLE}
+            WHERE country = '{country}' AND city_name = '{city}'
+            LIMIT 1
+        ),
+        city_h3 AS (
+            SELECT explode(h3_polyfillash3(geom_wkt, {resolution})) AS h3_cell
+            FROM city
+        ),
+        bbox_pois AS (
+            SELECT
+                p.poi_id,
+                p.category,
+                p.lon,
+                p.lat,
+                p.address,
+                h3_longlatash3(p.lon, p.lat, {resolution}) AS h3_cell
+            FROM {GOLD_PLACES_TABLE} p
+            CROSS JOIN city c
+            WHERE p.lon BETWEEN c.bbox_xmin AND c.bbox_xmax
+              AND p.lat BETWEEN c.bbox_ymin AND c.bbox_ymax
+              AND p.category IN ({cat_list})
+        )
+        SELECT b.*
+        FROM bbox_pois b
+        INNER JOIN city_h3 ch ON b.h3_cell = ch.h3_cell
     """
     return execute_query(query)
 

@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import json
 from typing import Optional
 
 import h3
 import numpy as np
 import pandas as pd
 import pydeck as pdk
+from shapely import wkt
 
 from explainability import tooltip_snippet
 
@@ -35,6 +37,19 @@ def _score_to_rgba(score: float) -> list[int]:
     return [r, g, b, 140]
 
 
+def _wkt_to_geojson(wkt_str: str) -> dict | None:
+    """Convert a WKT polygon string to a GeoJSON Feature."""
+    try:
+        geom = wkt.loads(wkt_str)
+        return json.loads(json.dumps({
+            "type": "Feature",
+            "geometry": geom.__geo_interface__,
+            "properties": {},
+        }))
+    except Exception:
+        return None
+
+
 def build_map(
     scored_df: pd.DataFrame,
     brand_locations: list[dict],
@@ -44,8 +59,9 @@ def build_map(
     count_vectors: Optional[pd.DataFrame] = None,
     brand_avg: Optional[pd.Series] = None,
     competitor_pois: Optional[pd.DataFrame] = None,
+    city_polygon_wkt: Optional[str] = None,
 ) -> pdk.Deck:
-    """Build a pydeck Deck with three layers.
+    """Build a pydeck Deck with H3 heatmap, brand dots, and top opportunities.
 
     Parameters
     ----------
@@ -58,6 +74,7 @@ def build_map(
     count_vectors : optional POI count matrix for tooltip explainability.
     brand_avg : optional brand average counts for tooltip comparison.
     competitor_pois : unused, kept for API compatibility.
+    city_polygon_wkt : optional WKT string of the real city polygon boundary.
     """
     has_competition = "opportunity_score" in scored_df.columns
     # ── 1. H3 heatmap layer — coloured by similarity ───────────────────────
@@ -166,6 +183,21 @@ def build_map(
     )
 
     layers = [h3_layer, brand_layer, top_layer]
+
+    if city_polygon_wkt:
+        feature = _wkt_to_geojson(city_polygon_wkt)
+        if feature:
+            boundary_layer = pdk.Layer(
+                "GeoJsonLayer",
+                data={"type": "FeatureCollection", "features": [feature]},
+                get_line_color=[80, 80, 80, 200],
+                get_fill_color=[0, 0, 0, 0],
+                line_width_min_pixels=2,
+                pickable=False,
+                stroked=True,
+                filled=False,
+            )
+            layers.insert(0, boundary_layer)
 
     # ── View state ──────────────────────────────────────────────────────────
     center_lat = h3_cells_df["center_lat"].mean()
