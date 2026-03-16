@@ -24,12 +24,14 @@ from brand_search import (
 )
 from config import (
     ALL_BUILDING_CATEGORIES,
+    ALL_CATEGORIES,
     ALL_FEATURE_GROUPS,
     CATEGORY_GROUPS,
     DEFAULT_H3_RESOLUTION,
     H3_RESOLUTIONS,
+    HEX2VEC_VOLUME_PATH,
 )
-from embeddings import normalise_buildings, run_embedding_pipeline
+from embeddings import load_hex2vec, normalise_buildings, run_embedding_pipeline
 from explainability import (
     build_brand_profile,
     build_fingerprint_df,
@@ -68,6 +70,27 @@ st.markdown(
     "neighbourhoods your brand thrives in and finds similar areas in the "
     "target market."
 )
+
+# ── Load pre-trained Hex2Vec model (once) ────────────────────────────────────
+
+if "hex2vec_model" not in st.session_state:
+    try:
+        embedder, model_meta = load_hex2vec(HEX2VEC_VOLUME_PATH)
+        st.session_state["hex2vec_model"] = embedder
+        st.session_state["hex2vec_meta"] = model_meta
+    except FileNotFoundError:
+        st.session_state["hex2vec_model"] = None
+        st.session_state["hex2vec_meta"] = None
+
+_pretrained = st.session_state.get("hex2vec_model")
+_pretrained_meta = st.session_state.get("hex2vec_meta")
+if _pretrained is not None:
+    st.info(
+        f"Using pre-trained Hex2Vec model "
+        f"(trained on {len(_pretrained_meta.get('cities', []))} cities, "
+        f"resolution {_pretrained_meta.get('resolution')})",
+        icon="✅",
+    )
 
 # ── Sidebar inputs ──────────────────────────────────────────────────────────
 
@@ -363,10 +386,33 @@ if run_button:
     progress.progress(40, text="Building count vectors…")
     count_vectors = build_count_vectors(features_df)
 
-    progress.progress(50, text="Training Hex2Vec (this may take a minute)…")
-    embeddings = run_embedding_pipeline(
-        h3_cells_df, features_df, all_cats,
+    # -- Generate embeddings (pre-trained transform or fit_transform) ---------
+    _use_pretrained = (
+        _pretrained is not None
+        and _pretrained_meta is not None
+        and _pretrained_meta.get("resolution") == resolution
     )
+
+    if _use_pretrained:
+        progress.progress(50, text="Generating embeddings (pre-trained model)…")
+        training_cats = _pretrained_meta["categories"]
+
+        emb_features_df = features_df.copy()
+        embeddings = run_embedding_pipeline(
+            h3_cells_df, emb_features_df, all_cats,
+            pretrained_embedder=_pretrained,
+            training_categories=training_cats,
+        )
+    else:
+        if _pretrained is not None and _pretrained_meta.get("resolution") != resolution:
+            st.warning(
+                f"Pre-trained model uses resolution {_pretrained_meta.get('resolution')} "
+                f"but you selected {resolution}. Falling back to training from scratch."
+            )
+        progress.progress(50, text="Training Hex2Vec (this may take a minute)…")
+        embeddings = run_embedding_pipeline(
+            h3_cells_df, features_df, all_cats,
+        )
 
     progress.progress(80, text="Computing similarity scores…")
     scored, brand_cells_in_emb = compute_similarity(

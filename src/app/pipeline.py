@@ -12,7 +12,11 @@ from __future__ import annotations
 import h3 as _h3
 import pandas as pd
 
-from config import GOLD_BUILDINGS_TABLE, GOLD_CITIES_TABLE, GOLD_PLACES_TABLE
+from config import (
+    GOLD_BUILDINGS_TABLE,
+    GOLD_CITIES_TABLE,
+    GOLD_PLACES_TABLE,
+)
 from db import execute_query
 
 
@@ -360,3 +364,133 @@ def get_pois_around_points(
     pois_df = execute_query(query)
     pois_df = pois_df[pois_df["h3_cell"].isin(cell_set)]
     return h3_cells_df, pois_df
+
+
+# ── Multi-city helpers (Hex2Vec pre-training) ────────────────────────────────
+
+_log = __import__("logging").getLogger(__name__)
+
+
+def tessellate_cities(
+    city_specs: list[tuple[str, str]],
+    resolution: int,
+) -> pd.DataFrame:
+    """H3-tessellate multiple cities and return the union of their cells.
+
+    Parameters
+    ----------
+    city_specs : list of (country_code, city_name) tuples.
+    resolution : H3 resolution.
+
+    Returns DataFrame with columns: h3_cell, center_lat, center_lon
+    (deduplicated across cities).
+    """
+    union_parts: list[str] = []
+    for country, city in city_specs:
+        union_parts.append(f"""
+            SELECT explode(h3_polyfillash3(geom_wkt, {resolution})) AS h3_cell
+            FROM {GOLD_CITIES_TABLE}
+            WHERE country = '{country}' AND city_name = '{city}'
+        """)
+
+    union_sql = " UNION ".join(union_parts)
+
+    query = f"""
+        WITH all_cells AS ({union_sql})
+        SELECT DISTINCT
+            h3_cell,
+            CAST(h3_centerasgeojson(h3_cell):coordinates[1] AS DOUBLE) AS center_lat,
+            CAST(h3_centerasgeojson(h3_cell):coordinates[0] AS DOUBLE) AS center_lon
+        FROM all_cells
+    """
+    return execute_query(query)
+
+
+def get_pois_for_cells(
+    h3_cells_df: pd.DataFrame,
+    resolution: int,
+    categories: list[str],
+) -> pd.DataFrame:
+    """Fetch POIs that fall within a pre-computed set of H3 cells.
+
+    Uses the cells' lat/lon bounds as a bbox pre-filter for scan efficiency,
+    then filters to exact cell membership in Python.
+
+    Returns DataFrame with columns: poi_id, category, lon, lat, address, h3_cell
+    """
+    cell_set = set(h3_cells_df["h3_cell"].tolist())
+    lat_min = h3_cells_df["center_lat"].min() - 0.05
+    lat_max = h3_cells_df["center_lat"].max() + 0.05
+    lon_min = h3_cells_df["center_lon"].min() - 0.05
+    lon_max = h3_cells_df["center_lon"].max() + 0.05
+
+    cat_list = ", ".join(f"'{c}'" for c in categories)
+
+    query = f"""
+        SELECT
+            poi_id,
+            category,
+            lon,
+            lat,
+            address,
+            h3_longlatash3(lon, lat, {resolution}) AS h3_cell
+        FROM {GOLD_PLACES_TABLE}
+        WHERE lon BETWEEN {lon_min} AND {lon_max}
+          AND lat BETWEEN {lat_min} AND {lat_max}
+          AND category IN ({cat_list})
+    """
+    pois_df = execute_query(query)
+    return pois_df[pois_df["h3_cell"].isin(cell_set)].reset_index(drop=True)
+
+
+def get_buildings_for_cells(
+    h3_cells_df: pd.DataFrame,
+    resolution: int,
+) -> pd.DataFrame:
+    """Fetch buildings that fall within a pre-computed set of H3 cells.
+
+    Returns DataFrame with columns:
+        building_id, building_category, height_bin, lon, lat, h3_cell
+    """
+    cell_set = set(h3_cells_df["h3_cell"].tolist())
+    lat_min = h3_cells_df["center_lat"].min() - 0.05
+    lat_max = h3_cells_df["center_lat"].max() + 0.05
+    lon_min = h3_cells_df["center_lon"].min() - 0.05
+    lon_max = h3_cells_df["center_lon"].max() + 0.05
+
+    query = f"""
+        SELECT
+            building_id,
+            building_category,
+            height_bin,
+            lon,
+            lat,
+            h3_cell
+        FROM {GOLD_BUILDINGS_TABLE}
+        WHERE lon BETWEEN {lon_min} AND {lon_max}
+          AND lat BETWEEN {lat_min} AND {lat_max}
+    """
+    bldg_df = execute_query(query)
+    return bldg_df[bldg_df["h3_cell"].isin(cell_set)].reset_index(drop=True)
+
+
+def validate_training_cities(
+    city_specs: list[tuple[str, str]],
+) -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
+    """Check which training cities exist in gold_cities.
+
+    Returns (found, missing) lists.
+    """
+    placeholders = ", ".join(
+        f"('{country}', '{city}')" for country, city in city_specs
+    )
+    query = f"""
+        SELECT DISTINCT country, city_name
+        FROM {GOLD_CITIES_TABLE}
+        WHERE (country, city_name) IN ({placeholders})
+    """
+    df = execute_query(query)
+    found_set = set(zip(df["country"], df["city_name"]))
+    found = [cs for cs in city_specs if cs in found_set]
+    missing = [cs for cs in city_specs if cs not in found_set]
+    return found, missing
