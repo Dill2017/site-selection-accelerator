@@ -16,7 +16,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import shutil
 import sys
 import tempfile
 import time
@@ -500,7 +499,8 @@ def main(catalog: str, schema: str, warehouse_id: str) -> str:
     log.info("Hex2Vec fitting complete.")
 
     # -- Save model and metadata ---------------------------------------------
-    # UC Volumes don't support mkdir via pathlib; save locally first, then copy.
+    # UC Volumes don't support standard filesystem writes via FUSE for nested
+    # paths; use the Databricks SDK Files API to upload reliably.
     with tempfile.TemporaryDirectory() as tmp:
         local_dir = Path(tmp) / "hex2vec"
         local_dir.mkdir()
@@ -522,12 +522,13 @@ def main(catalog: str, schema: str, warehouse_id: str) -> str:
             json.dumps(metadata, indent=2)
         )
 
-        # Copy each file to the Volume path individually
-        vol_dir = Path(model_path)
         for src_file in local_dir.iterdir():
-            dst = vol_dir / src_file.name
-            log.info("Copying %s -> %s", src_file.name, dst)
-            shutil.copy2(src_file, dst)
+            if not src_file.is_file():
+                continue
+            dest_path = f"{model_path}/{src_file.name}"
+            log.info("Uploading %s -> %s", src_file.name, dest_path)
+            with open(src_file, "rb") as f:
+                client.files.upload(dest_path, f, overwrite=True)
 
     log.info("Model saved to %s", model_path)
     return model_path
