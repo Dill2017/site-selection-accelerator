@@ -59,3 +59,34 @@ resources:
               spark.master: "local[*]"
             custom_tags:
               ResourceClass: SingleNode
+        - task_key: "train_hex2vec"
+          depends_on:
+            - task_key: "create_gold_cities"
+            - task_key: "create_gold_places"
+            - task_key: "create_gold_buildings"
+          spark_python_task:
+            python_file: ../src/pipeline/train_hex2vec.py
+            parameters:
+              - "${var.catalog}"
+              - "${var.schema}"
+              - "${var.warehouse_id}"
+          libraries:
+            - pypi:
+                package: "databricks-sdk>=0.65.0"
+            - pypi:
+                package: "srai[torch]>=0.8.0"
+            - pypi:
+                package: "geopandas"
+            - pypi:
+                package: "h3>=4"
+            - pypi:
+                package: "shapely"
+          new_cluster:
+            spark_version: "16.4.x-scala2.13"
+            node_type_id: "Standard_DS4_v2"
+            num_workers: 0
+            spark_conf:
+              spark.databricks.cluster.profile: singleNode
+              spark.master: "local[*]"
+            custom_tags:
+              ResourceClass: SingleNode

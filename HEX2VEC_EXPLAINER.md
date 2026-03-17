@@ -13,11 +13,12 @@ way to a ranked list of whitespace opportunities for a brand.
 3. [Step 2 — Counting POI Features per Cell](#step-2--counting-poi-features-per-cell)
 4. [Step 3 — From Count Vectors to Dense Embeddings](#step-3--from-count-vectors-to-dense-embeddings)
 5. [Step 4 — How Hex2Vec Learns](#step-4--how-hex2vec-learns)
-6. [Step 5 — Brand Profiling and Cosine Similarity](#step-5--brand-profiling-and-cosine-similarity)
-7. [Step 6 — Interpreting the Scores](#step-6--interpreting-the-scores)
-8. [Worked Example](#worked-example)
-9. [Why Not Just Use Count Vectors?](#why-not-just-use-count-vectors)
-10. [References](#references)
+6. [Step 4b — Multi-City Pre-Training](#step-4b--multi-city-pre-training)
+7. [Step 5 — Brand Profiling and Cosine Similarity](#step-5--brand-profiling-and-cosine-similarity)
+8. [Step 6 — Interpreting the Scores](#step-6--interpreting-the-scores)
+9. [Worked Example](#worked-example)
+10. [Why Not Just Use Count Vectors?](#why-not-just-use-count-vectors)
+11. [References](#references)
 
 ---
 
@@ -165,11 +166,11 @@ For each H3 cell (the "anchor"), Hex2Vec:
 This is a contrastive learning setup (similar to triplet loss):
 
 ```
-                ┌──────────────┐
-  Feature       │   Encoder    │      Embedding
-  vector   ───► │  [15, 10]    │ ───►  (10-dim)
-  (sparse)      │  dense layers│      (dense)
-                └──────────────┘
+                ┌──────────────────┐
+  Feature       │     Encoder      │      Embedding
+  vector   ───► │  [48, 24, 12]    │ ───►  (12-dim)
+  (sparse)      │  dense layers    │      (dense)
+                └──────────────────┘
 
   Loss = -log σ(sim(anchor, positive)) - log σ(-sim(anchor, negative))
 
@@ -180,10 +181,30 @@ This is a contrastive learning setup (similar to triplet loss):
 ### Architecture
 
 The encoder is a small feed-forward network with configurable hidden layer
-sizes. In this accelerator, the default is `[15, 10]`:
+sizes.
+
+**Pre-trained model** (multi-city, used by default): `[48, 24, 12]`
 
 ```
-Input layer:  N features (one per POI category, e.g. 28)
+Input layer:  N features (one per POI + building category, e.g. 43)
+     │
+     ▼
+Hidden 1:     48 neurons + ReLU
+     │
+     ▼
+Hidden 2:     24 neurons + ReLU
+     │
+     ▼
+Hidden 3:     12 neurons ← this is the embedding dimension
+     │
+     ▼
+Output:       12-dimensional embedding vector
+```
+
+**Fallback** (single-city, trained from scratch): `[15, 10]`
+
+```
+Input layer:  N features
      │
      ▼
 Hidden 1:     15 neurons + ReLU
@@ -197,18 +218,84 @@ Output:       10-dimensional embedding vector
 
 The encoder is shared between anchor and neighbour — both cells are
 encoded by the same weights, ensuring that cells with similar POI
-surroundings end up near each other in the 10-dimensional embedding space.
+surroundings end up near each other in the embedding space.
 
 ### What the Model Captures
 
-After training (default: 5 epochs over the cell neighbourhood graph),
-the 10-dimensional embedding for each cell encodes:
+After training (pre-trained: 10 epochs, fallback: 5 epochs),
+the embedding for each cell encodes:
 
 - **Local POI mix** — what types of places are in the cell.
 - **Neighbourhood context** — what types of places surround the cell.
 - **Learned category relationships** — restaurants and cafes are treated as
   more similar to each other than to, say, gas stations, even though all
   three are separate columns in the count vector.
+
+---
+
+## Step 4b — Multi-City Pre-Training
+
+The original Hex2Vec paper (Woźniak & Szymański, 2021) demonstrated in
+Figure 11 that training on **multiple diverse cities** produces embeddings
+that generalise better to unseen locations — much like a language model
+trained on a large corpus transfers better than one trained on a single
+document.
+
+### Why Pre-Train?
+
+| Approach | Pros | Cons |
+|---|---|---|
+| **Single-city fit_transform** | Simple; no setup | Sees only one city's spatial patterns; cold start every run |
+| **Multi-city pre-training** | Richer spatial vocabulary; fast inference; captures universal patterns (e.g. "commercial district" looks similar worldwide) | Requires an offline training step |
+
+### How It Works
+
+The `train_hex2vec` task (run as part of the ETL job) performs the
+following:
+
+1. **City selection** — 37 diverse cities from the paper's Figure 11
+   (Moscow, London, Paris, Istanbul, Berlin, Madrid, Rome, Tokyo, …)
+   are validated against the `gold_cities` table.
+2. **Tessellation** — all valid cities are tessellated into H3 cells at
+   resolution 9 using `h3_polyfillash3` in a single batched SQL query.
+3. **Feature collection** — POIs and buildings for all cells are fetched
+   from `gold_places` and `gold_buildings` using bounding-box pre-filtering
+   and exact H3 cell membership checks for efficiency.
+4. **Model fitting** — a `Hex2VecEmbedder` with encoder sizes `[48, 24, 12]`
+   is trained for 10 epochs on the combined neighbourhood graph of all
+   cities. The larger encoder and more training data allow the model to
+   learn richer spatial representations.
+5. **Persistence** — the trained model weights (`model.pt`, `config.json`)
+   and metadata (`hex2vec_metadata.json` — categories, resolution, city
+   list, timestamps) are uploaded to a **Unity Catalog Volume** via the
+   Databricks SDK Files API.
+
+### How the App Uses It
+
+At startup, the Streamlit application attempts to download the pre-trained
+model from the UC Volume. If a compatible model is found (matching the
+user's selected H3 resolution), the app uses `embedder.transform()` for
+**inference only** — skipping the training step entirely. This reduces
+the embedding generation time from ~60 seconds to a few seconds.
+
+If the user selects a different H3 resolution than the pre-trained model
+was trained on, the app falls back to the original `fit_transform` path
+and displays a warning.
+
+When using the pre-trained model, features are constructed using the
+**full training category set** (all POI + building categories), ensuring
+compatibility with the encoder weights. The user's category selections
+still affect which categories are included in the similarity scoring and
+explainability panels.
+
+### Model Storage
+
+```
+/Volumes/<catalog>/<schema>/models/hex2vec/
+├── config.json              # SRAI model config (encoder architecture)
+├── model.pt                 # PyTorch model weights
+└── hex2vec_metadata.json    # Categories, resolution, city list, timestamps
+```
 
 ---
 
@@ -300,9 +387,11 @@ Keep in mind:
 - Scores are **relative within a single run**. A score of 0.75 in one city
   is not directly comparable to 0.75 in another city (unless they were
   analysed together).
-- The embedding model is trained **fresh each time** with only 5 epochs.
-  For production use, consider training on a larger dataset and saving the
-  model for reuse.
+- When using the **pre-trained model**, embeddings are generated from a
+  model trained on 37 cities, so scores are more stable and comparable
+  across cities than the fallback single-city approach.
+- If no pre-trained model is available, the model is trained **fresh each
+  time** with 5 epochs on the current session's data only.
 - **More brand locations = better profile**. A single location gives a
   noisy profile; 5+ locations give a more stable signal.
 
@@ -332,8 +421,11 @@ London. Here is the pipeline, step by step:
 3. **Count vectors**: An 8,000 x 8 matrix (cells x categories) is built.
    Most cells have at least a few POIs; central cells might have dozens.
 
-4. **Hex2Vec training**: The encoder trains for 5 epochs over the H3
-   neighbourhood graph. Each cell gets a 10-dimensional embedding.
+4. **Hex2Vec embedding**: If a pre-trained model is available (trained on
+   37 cities), the encoder transforms the feature vectors into embeddings
+   in seconds — no training needed. Otherwise, a fresh encoder trains for
+   5 epochs over the H3 neighbourhood graph. Each cell gets a dense
+   embedding.
 
    *Cell near Shoreditch (many cafes, bars, clothing stores)*:
    `[0.8, -0.2, 0.5, 0.9, 0.1, -0.3, 0.7, 0.4, -0.1, 0.6]`

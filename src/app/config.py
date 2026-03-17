@@ -118,3 +118,56 @@ DEFAULT_H3_RESOLUTION = 9
 
 TRAINING_EPOCHS = 5
 TRAINING_BATCH_SIZE = 128
+
+# ---------------------------------------------------------------------------
+# Pre-trained Hex2Vec (multi-city) configuration
+# ---------------------------------------------------------------------------
+
+HEX2VEC_VOLUME_PATH = f"/Volumes/{_CATALOG}/{_SCHEMA}/models/hex2vec"
+
+PRETRAIN_ENCODER_SIZES = [48, 24, 12]
+PRETRAIN_EPOCHS = 10
+PRETRAIN_BATCH_SIZE = 256
+
+# Cities used for multi-city pre-training (from the Hex2Vec paper, Figure 11).
+# Each entry is (country_code, city_name) matching gold_cities naming.
+# Names use local-language spelling as stored by CARTO Overture Maps.
+HEX2VEC_TRAINING_CITIES: list[tuple[str, str]] = [
+    ("RU", "Москва"),
+    ("GB", "London"),
+    ("IT", "Roma"),
+    ("US", "New York"),
+    ("DE", "Berlin"),
+    ("FI", "Helsinki"),
+    ("NO", "Oslo"),
+    ("US", "Chicago"),
+    ("PL", "Warszawa"),
+    ("ES", "Madrid"),
+    ("CZ", "Praha"),
+    ("LT", "Vilnius"),
+    ("KZ", "Астана"),
+    ("AT", "Wien"),
+    ("BY", "Мінск"),
+    ("LV", "Rīga"),
+    ("RS", "Београд"),
+    ("SK", "Bratislava"),
+    ("US", "San Francisco"),
+    ("PL", "Kraków"),
+    ("PL", "Gdańsk"),
+    ("PL", "Wrocław"),
+    ("PL", "Łódź"),
+    ("HR", "Zagreb"),
+    ("SE", "Stockholm"),
+    ("PL", "Poznań"),
+    ("IS", "Reykjavík"),
+    ("SI", "Ljubljana"),
+    ("NL", "Amsterdam"),
+    ("EE", "Tallinn"),
+    ("BG", "София"),
+    ("IE", "Dublin"),
+    ("FR", "Paris"),
+    ("PT", "Lisboa"),
+    ("LU", "Luxembourg"),
+    ("CH", "Bern"),
+    ("BE", "Bruxelles - Brussel"),
+]
