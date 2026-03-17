@@ -60,7 +60,8 @@ enabling cross-city expansion analysis.
 │  │  • regions_gdf from H3 polygons                              │    │
 │  │  • features_gdf with one-hot POI + building categories       │    │
 │  │  • joint_gdf from DBSQL H3 assignment                        │    │
-│  │  • Hex2VecEmbedder.fit_transform()                           │    │
+│  │  • Pre-trained model: load + transform (fast)                 │    │
+│  │  • Fallback: Hex2VecEmbedder.fit_transform() (from scratch)  │    │
 │  └──────────────────────────┬───────────────────────────────────┘    │
 │                             ▼                                        │
 │  ┌──────────────────────────────────────────────────────────────┐    │
@@ -125,6 +126,7 @@ enabling cross-city expansion analysis.
 │  → gold_buildings      │
 │  → gold_places_enriched│
 │  → Genie Space setup   │
+│  → Hex2Vec pre-training│
 └───────────────────────┘
 ```
 
@@ -235,6 +237,12 @@ The ETL job also runs `setup_genie_space.py`, which creates (or updates) a
 Genie Space configured with `h3_polyfillash3`-based spatial instructions and
 example SQL, then persists the space ID to `app_config`.
 
+Additionally, the job runs `train_hex2vec.py`, which pre-trains a Hex2Vec
+model on multiple cities (following the
+[Hex2Vec paper](https://arxiv.org/abs/2111.00970) methodology) and saves
+it to a UC Volume. See [HEX2VEC_EXPLAINER.md](HEX2VEC_EXPLAINER.md) for
+details on why multi-city pre-training produces better embeddings.
+
 ### Step 2 — User Input
 
 The Streamlit sidebar collects:
@@ -289,8 +297,25 @@ Using the [SRAI](https://kraina-ai.github.io/srai/) library:
    encoded category columns spanning both POI and building categories.
 4. Constructs a `joint_gdf` (region-feature mapping) directly from the DBSQL
    H3 assignment.
-5. Trains a **Hex2VecEmbedder** (encoder sizes `[15, 10]`, 5 epochs, CPU)
-   on the H3 neighbourhood graph to produce dense embeddings per cell.
+5. **Generates embeddings** — the app uses one of two paths:
+
+   | Path | When | How |
+   |---|---|---|
+   | **Pre-trained model (fast)** | A model saved to the UC Volume matches the selected H3 resolution | Calls `embedder.transform()` — inference only, no training needed |
+   | **Fit-from-scratch (fallback)** | No pre-trained model available, or resolution mismatch | Trains a fresh `Hex2VecEmbedder` via `fit_transform()` |
+
+   The pre-trained model is generated offline by the `train_hex2vec` ETL task,
+   which fits an encoder (sizes `[48, 24, 12]`, 10 epochs) on 37 cities
+   simultaneously. This multi-city training captures a richer spatial vocabulary
+   than training on a single target city, following the approach from the
+   [Hex2Vec paper](https://arxiv.org/abs/2111.00970) (see Figure 11). The
+   model and metadata are persisted to a UC Volume and downloaded at app
+   startup via the Databricks SDK Files API.
+
+   When the pre-trained model is used, the features are constructed using
+   the full set of training categories (all POI + building categories), even
+   if the user selected a subset. This ensures the feature vectors are
+   compatible with the trained encoder weights.
 
 Building data enriches the embeddings with land-use signals (residential vs.
 commercial vs. industrial) and urbanisation density (height profile) that POIs
@@ -387,6 +412,7 @@ site_selection_accelerator/
     │   └── map_viz.py                # pydeck map (heatmap + city boundary outline)
     └── pipeline/
         ├── setup_genie_space.py      # Genie Space provisioning (create/update/persist)
+        ├── train_hex2vec.py          # Multi-city Hex2Vec pre-training (DAB job task)
         └── transformations/
             ├── setup_schema.sql      # CREATE SCHEMA IF NOT EXISTS
             ├── gold_cities.sql       # CTAS: cities + ST_Union'd polygons + bboxes
@@ -442,8 +468,10 @@ site_selection_accelerator/
   instructions.
 - **Custom Genie instructions** — edit `setup_genie_space.py` to add
   domain-specific instructions or example question-SQL pairs.
-- **Scale Hex2Vec training** — for large regions, offload training to a
-  Databricks Job / notebook with GPU cluster.
+- **Retrain Hex2Vec** — edit `HEX2VEC_TRAINING_CITIES` in `config.py` to
+  change the city set, or adjust `PRETRAIN_ENCODER_SIZES` / `PRETRAIN_EPOCHS`
+  / `PRETRAIN_BATCH_SIZE`, then re-run the ETL job. The `train_hex2vec` task
+  saves the new model to the UC Volume; the app picks it up on next restart.
 - **Alternative embedders** — swap `Hex2VecEmbedder` for SRAI's
   `CountEmbedder` (no training needed, faster) or
   `ContextualCountEmbedder` (neighbourhood-aware counts).
