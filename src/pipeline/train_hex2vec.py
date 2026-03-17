@@ -16,7 +16,9 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 import sys
+import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -498,26 +500,37 @@ def main(catalog: str, schema: str, warehouse_id: str) -> str:
     log.info("Hex2Vec fitting complete.")
 
     # -- Save model and metadata ---------------------------------------------
-    model_dir = Path(model_path)
-    model_dir.mkdir(parents=True, exist_ok=True)
+    # UC Volumes don't support mkdir via pathlib; save locally first, then copy.
+    with tempfile.TemporaryDirectory() as tmp:
+        local_dir = Path(tmp) / "hex2vec"
+        local_dir.mkdir()
 
-    embedder.save(model_dir)
+        embedder.save(local_dir)
 
-    metadata = {
-        "categories": ALL_TRAINING_CATEGORIES,
-        "resolution": H3_RESOLUTION,
-        "encoder_sizes": ENCODER_SIZES,
-        "max_epochs": MAX_EPOCHS,
-        "batch_size": BATCH_SIZE,
-        "cities": [list(c) for c in found],
-        "num_regions": len(regions_gdf),
-        "num_features": len(features_gdf),
-        "saved_at": datetime.now(timezone.utc).isoformat(),
-    }
-    (model_dir / METADATA_FILENAME).write_text(json.dumps(metadata, indent=2))
+        metadata = {
+            "categories": ALL_TRAINING_CATEGORIES,
+            "resolution": H3_RESOLUTION,
+            "encoder_sizes": ENCODER_SIZES,
+            "max_epochs": MAX_EPOCHS,
+            "batch_size": BATCH_SIZE,
+            "cities": [list(c) for c in found],
+            "num_regions": len(regions_gdf),
+            "num_features": len(features_gdf),
+            "saved_at": datetime.now(timezone.utc).isoformat(),
+        }
+        (local_dir / METADATA_FILENAME).write_text(
+            json.dumps(metadata, indent=2)
+        )
 
-    log.info("Model saved to %s", model_dir)
-    return str(model_dir)
+        # Copy each file to the Volume path individually
+        vol_dir = Path(model_path)
+        for src_file in local_dir.iterdir():
+            dst = vol_dir / src_file.name
+            log.info("Copying %s -> %s", src_file.name, dst)
+            shutil.copy2(src_file, dst)
+
+    log.info("Model saved to %s", model_path)
+    return model_path
 
 
 if __name__ == "__main__":
