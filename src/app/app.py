@@ -81,6 +81,10 @@ if "hex2vec_model" not in st.session_state:
     except FileNotFoundError:
         st.session_state["hex2vec_model"] = None
         st.session_state["hex2vec_meta"] = None
+    except Exception as exc:
+        st.session_state["hex2vec_model"] = None
+        st.session_state["hex2vec_meta"] = None
+        st.warning(f"Could not load pre-trained model: {exc}")
 
 _pretrained = st.session_state.get("hex2vec_model")
 _pretrained_meta = st.session_state.get("hex2vec_meta")

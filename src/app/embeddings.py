@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -176,16 +177,56 @@ def load_hex2vec(
 ) -> tuple[Hex2VecEmbedder, dict]:
     """Load a pre-trained Hex2VecEmbedder and its metadata.
 
+    Downloads model files from a UC Volume via the Databricks SDK Files
+    API into a local temp directory (the App environment doesn't have
+    FUSE access to /Volumes/ paths), then loads from there.
+
     Returns (embedder, metadata_dict).
-    Raises FileNotFoundError if the model directory does not exist.
+    Raises FileNotFoundError if the model files do not exist on the Volume.
     """
-    base = Path(base_path)
-    meta_file = base / _METADATA_FILENAME
+    from databricks.sdk import WorkspaceClient
+
+    client = WorkspaceClient()
+    volume_path = str(base_path)
+
+    _log.info("Downloading pre-trained Hex2Vec from %s", volume_path)
+
+    try:
+        resp = client.api_client.do(
+            "GET",
+            f"/api/2.0/fs/directories{volume_path}",
+        )
+        if isinstance(resp, bytes):
+            resp = json.loads(resp)
+        contents = resp.get("contents", [])
+    except Exception as exc:
+        raise FileNotFoundError(
+            f"Could not list Volume directory {volume_path}: {exc}"
+        ) from exc
+
+    if not contents:
+        raise FileNotFoundError(f"No files found at {volume_path}")
+
+    # Persistent temp dir (survives for the lifetime of the process)
+    local_dir = Path(tempfile.mkdtemp(prefix="hex2vec_"))
+
+    for entry in contents:
+        if entry.get("is_directory"):
+            continue
+        name = entry["name"]
+        file_path = f"{volume_path}/{name}"
+        _log.info("Downloading %s", name)
+        resp = client.files.download(file_path)
+        (local_dir / name).write_bytes(resp.contents.read())
+
+    meta_file = local_dir / _METADATA_FILENAME
     if not meta_file.exists():
-        raise FileNotFoundError(f"No Hex2Vec metadata at {meta_file}")
+        raise FileNotFoundError(
+            f"Downloaded files but {_METADATA_FILENAME} not found"
+        )
 
     metadata = json.loads(meta_file.read_text())
-    embedder = Hex2VecEmbedder.load(base)
+    embedder = Hex2VecEmbedder.load(local_dir)
     _log.info(
         "Loaded pre-trained Hex2Vec (resolution=%s, %d categories, saved %s)",
         metadata.get("resolution"),
