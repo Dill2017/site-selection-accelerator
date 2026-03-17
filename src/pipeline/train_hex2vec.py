@@ -123,7 +123,7 @@ def _execute_sql(
         warehouse_id=warehouse_id,
         catalog=catalog,
         schema=schema,
-        wait_timeout="120s",
+        wait_timeout="50s",
         disposition=Disposition.INLINE,
         format=Format.JSON_ARRAY,
         byte_limit=26214400,
