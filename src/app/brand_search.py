@@ -22,6 +22,7 @@ import os
 import h3
 import pandas as pd
 from databricks.sdk import WorkspaceClient
+from databricks.sdk.service.serving import ChatMessage, ChatMessageRole
 
 import config as cfg
 
@@ -308,7 +309,7 @@ Competitors:"""
         w = _get_workspace_client()
         response = w.serving_endpoints.query(
             name="databricks-claude-opus-4-6",
-            messages=[{"role": "user", "content": prompt}],
+            messages=[ChatMessage(role=ChatMessageRole.USER, content=prompt)],
             max_tokens=300,
             temperature=0.1,
         )

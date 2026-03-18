@@ -427,14 +427,15 @@ async def get_hexagon_detail(session_id: str, hex_id: str):
     from explainability import (
         build_fingerprint_df,
         explain_competition,
-        explain_opportunity,
-        summarise_explanation,
+        summarise_fingerprint,
     )
 
-    exp = explain_opportunity(h3_cell, pr.count_vectors, pr.brand_avg)
-    summary = summarise_explanation(exp)
-
     fingerprint_df = build_fingerprint_df(h3_cell, pr.count_vectors, pr.brand_avg)
+    try:
+        summary = summarise_fingerprint(fingerprint_df)
+    except Exception as exc:
+        log.warning("summarise_fingerprint error: %s", exc)
+        summary = ""
     fp_rows: list[FingerprintRow] = []
     if not fingerprint_df.empty:
         for _, row in fingerprint_df.iterrows():

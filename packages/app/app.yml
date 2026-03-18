@@ -1,4 +1,4 @@
-command: ["uvicorn", "site_selection.backend.app:app", "--workers", "2"]
+command: ["uvicorn", "site_selection.backend.app:app", "--workers", "1"]
 
 env:
   - name: DATABRICKS_WAREHOUSE_ID

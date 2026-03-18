@@ -147,10 +147,6 @@ export function FingerprintPanel({
               </div>
             </div>
 
-            <p className="text-xs text-muted-foreground">
-              Compare this location&apos;s feature mix against the brand average.
-            </p>
-
             <FingerprintChart
               detail={detail}
               chartStyle={chartStyle}

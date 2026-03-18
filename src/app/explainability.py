@@ -7,9 +7,15 @@ learned Hex2Vec embeddings.
 
 from __future__ import annotations
 
+import logging
+
 import pandas as pd
 
 from config import ALL_BUILDING_CATEGORIES, ALL_FEATURE_GROUPS
+
+log = logging.getLogger(__name__)
+
+FINGERPRINT_LLM_ENDPOINT = "databricks-meta-llama-3-3-70b-instruct"
 
 
 def build_brand_profile(
@@ -195,6 +201,124 @@ def build_fingerprint_df(
                 )
 
     return df
+
+
+def _build_fingerprint_prompt(fingerprint_df: pd.DataFrame) -> str | None:
+    """Build an LLM prompt from fingerprint data, or return None if trivial."""
+    non_zero = fingerprint_df[
+        (fingerprint_df["This Location"] > 0) | (fingerprint_df["Brand Average"] > 0)
+    ].copy()
+    if non_zero.empty:
+        return None
+
+    non_zero["pct_diff"] = (
+        non_zero["This Location (%)"] - non_zero["Brand Average (%)"]
+    )
+
+    over = non_zero[non_zero["pct_diff"] > 1.0].nlargest(5, "pct_diff")
+    under = non_zero[non_zero["pct_diff"] < -1.0].nsmallest(5, "pct_diff")
+
+    rows: list[str] = []
+    for _, r in over.iterrows():
+        rows.append(
+            f"  {r['Category']} ({r['Group']}): {r['This Location (%)']:.1f}% here vs "
+            f"{r['Brand Average (%)']:.1f}% brand avg (+{r['pct_diff']:.1f}pp)"
+        )
+    for _, r in under.iterrows():
+        rows.append(
+            f"  {r['Category']} ({r['Group']}): {r['This Location (%)']:.1f}% here vs "
+            f"{r['Brand Average (%)']:.1f}% brand avg ({r['pct_diff']:.1f}pp)"
+        )
+
+    if not rows:
+        return None
+
+    data_block = "\n".join(rows)
+
+    return f"""You are a site-selection analyst. A user is evaluating a location for a new store.
+Below are the categories where this location's POI/building mix differs most from the brand's average existing locations. Percentages are share-of-type (POI or Building).
+
+{data_block}
+
+Write exactly 1–2 sentences (max 40 words) that explain what this means for the end user considering this site. Be specific about the categories, insightful, and practical. Do NOT use bullet points or lists. Do NOT repeat the numbers."""
+
+
+def summarise_fingerprint(fingerprint_df: pd.DataFrame) -> str:
+    """Generate an LLM-powered insight from fingerprint data.
+
+    Uses Databricks ai_query() via the SQL warehouse to call a Foundation
+    Model endpoint.  This works from Databricks Apps because the warehouse
+    is already an app resource.  Falls back to a rule-based summary on error.
+    """
+    if fingerprint_df.empty:
+        return ""
+
+    prompt = _build_fingerprint_prompt(fingerprint_df)
+    if prompt is None:
+        return (
+            "This location's category mix closely mirrors the brand average "
+            "— no single category stands out significantly."
+        )
+
+    try:
+        from db import execute_query
+
+        safe_prompt = prompt.replace("\\", "\\\\").replace("'", "''")
+        query = (
+            f"SELECT ai_query('{FINGERPRINT_LLM_ENDPOINT}', "
+            f"'{safe_prompt}') AS summary"
+        )
+        result_df = execute_query(query)
+        if not result_df.empty:
+            raw = str(result_df.iloc[0]["summary"]).strip()
+            if raw.startswith('"') and raw.endswith('"'):
+                raw = raw[1:-1]
+            text = raw.strip()
+            if text:
+                log.info("Fingerprint LLM insight: %s", text[:80])
+                return text
+    except Exception as e:
+        log.warning("Fingerprint ai_query failed: %s — using fallback", e)
+
+    return _fallback_fingerprint_summary(fingerprint_df)
+
+
+def _fallback_fingerprint_summary(fingerprint_df: pd.DataFrame) -> str:
+    """Rule-based fallback when the LLM call is unavailable."""
+    non_zero = fingerprint_df[
+        (fingerprint_df["This Location"] > 0) | (fingerprint_df["Brand Average"] > 0)
+    ].copy()
+    if non_zero.empty:
+        return "No points of interest or buildings detected in this area."
+
+    non_zero["pct_diff"] = (
+        non_zero["This Location (%)"] - non_zero["Brand Average (%)"]
+    )
+    over = non_zero[non_zero["pct_diff"] > 1.5].nlargest(3, "pct_diff")
+    under = non_zero[non_zero["pct_diff"] < -1.5].nsmallest(3, "pct_diff")
+
+    def _fmt(rows: pd.DataFrame) -> str:
+        names = rows["Category"].tolist()
+        if len(names) == 1:
+            return names[0]
+        return ", ".join(names[:-1]) + " and " + names[-1]
+
+    parts: list[str] = []
+    if not over.empty:
+        parts.append(
+            f"this area over-indexes on {_fmt(over)} compared to typical brand locations"
+        )
+    if not under.empty:
+        parts.append(f"it under-indexes on {_fmt(under)}")
+
+    if not parts:
+        return (
+            "This location's category mix closely mirrors the brand average "
+            "— no single category stands out significantly."
+        )
+
+    sentence = "; ".join(parts) + "."
+    return sentence[0].upper() + sentence[1:]
 
 
 def tooltip_snippet(

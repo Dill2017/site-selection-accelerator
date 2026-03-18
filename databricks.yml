@@ -4,6 +4,10 @@ bundle:
 include:
   - resources/*.yml
 
+sync:
+  include:
+    - packages/app/.build
+
 variables:
   catalog:
     default: "dilshad_shawki"
