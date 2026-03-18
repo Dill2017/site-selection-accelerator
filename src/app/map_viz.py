@@ -237,7 +237,7 @@ def build_map(
         tooltip_html += _row("Top 3 Competitors", "top_competitors")
     tooltip_html += (
         "<hr style='margin:4px 0;border-color:#555'/>"
-        "<b>POI Mix</b> (this cell / brand avg):<br/>"
+        "<b>Feature Mix</b> (% vs brand avg):<br/>"
         "{cat_detail}"
     )
 

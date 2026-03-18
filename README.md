@@ -358,7 +358,8 @@ Hovering over any H3 cell shows a tooltip with:
 - Opportunity score and similarity percentage
 - POI count (total amenities in the cell)
 - Competitor count and top 3 competitor names (ranked by popularity)
-- Category breakdown comparing the cell's POI mix against the brand average
+- Feature mix breakdown showing the most distinctive categories as normalised
+  percentages (within POI / Building types) vs the brand average
 
 Hovering over a brand location dot shows:
 - H3 cell ID
@@ -374,7 +375,10 @@ explanations using the raw POI count vectors:
   feature type (POI vs. Building) with independent scales. Values are shown as
   **% within type** so building counts don't overshadow POI counts.
 - **Enhanced tooltips** — hovering any hexagon on the map shows the top 4
-  categories in that cell compared to the brand average.
+  most distinctive categories as **% within feature type** (POI / Building
+  normalised independently), sorted by largest deviation from the brand
+  average. Directional arrows (▲/▼) indicate whether each category is above
+  or below the brand profile.
 - **Category Fingerprint** — clicking any row in the Top 20 table reveals a
   fingerprint chart showing **all** feature categories (POI + building) for the
   selected location versus the brand average. Users can toggle between **line

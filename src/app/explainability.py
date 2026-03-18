@@ -41,10 +41,13 @@ def explain_opportunity(
     Returns
     -------
     dict with keys:
-        counts – Series of raw counts for the cell
-        diff   – Series of (cell - brand_avg)
+        counts       – Series of raw counts for the cell
+        diff         – Series of (cell - brand_avg)
         top_matching – list of (category, cell_count, brand_avg) sorted
                        by smallest |diff|, limited to non-zero entries
+        top_features – list of (category, cell_pct, avg_pct, pct_diff)
+                       sorted by largest |pct_diff|, normalised within
+                       POI / Building feature types independently
         group_summary – dict[group_name -> float] average diff per group
     """
     if cell_id in count_vectors.index:
@@ -61,6 +64,28 @@ def explain_opportunity(
         for cat in abs_diff.index[:5]
     ]
 
+    # Percentage-normalised comparison within each feature type
+    _bldg_set = set(ALL_BUILDING_CATEGORIES)
+    cell_pct = pd.Series(0.0, index=counts.index)
+    avg_pct = pd.Series(0.0, index=brand_avg.index)
+
+    for is_bldg in (True, False):
+        mask = counts.index.map(lambda c, _ib=is_bldg: (c in _bldg_set) == _ib)
+        cell_total = counts[mask].sum()
+        avg_total = brand_avg[mask].sum()
+        if cell_total > 0:
+            cell_pct[mask] = (counts[mask] / cell_total * 100).round(1)
+        if avg_total > 0:
+            avg_pct[mask] = (brand_avg[mask] / avg_total * 100).round(1)
+
+    pct_diff = cell_pct - avg_pct
+    ranked = pct_diff[non_zero_mask].abs().sort_values(ascending=False)
+    top_features = [
+        (cat, round(float(cell_pct[cat]), 1), round(float(avg_pct[cat]), 1),
+         round(float(pct_diff[cat]), 1))
+        for cat in ranked.index[:5]
+    ]
+
     group_summary = {}
     for group, cats in ALL_FEATURE_GROUPS.items():
         cats_present = [c for c in cats if c in diff.index]
@@ -71,6 +96,7 @@ def explain_opportunity(
         "counts": counts,
         "diff": diff,
         "top_matching": top_matching,
+        "top_features": top_features,
         "group_summary": group_summary,
     }
 
@@ -180,7 +206,8 @@ def tooltip_snippet(
     """Short HTML snippet for map tooltip showing top category comparisons."""
     exp = explain_opportunity(cell_id, count_vectors, brand_avg)
     lines = []
-    for cat, cell_val, avg_val in exp["top_matching"][:max_cats]:
+    for cat, cell_pct, avg_pct, diff_pct in exp["top_features"][:max_cats]:
         label = cat.replace("_", " ").title()
-        lines.append(f"{label}: {cell_val} / {avg_val}")
+        arrow = "▲" if diff_pct > 0 else "▼" if diff_pct < 0 else "="
+        lines.append(f"{label}: {cell_pct}% {arrow} (avg {avg_pct}%)")
     return "<br/>".join(lines)
