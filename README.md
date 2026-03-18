@@ -26,80 +26,48 @@ enabling cross-city expansion analysis.
 
 ```
 ┌───────────────────────────────────────────────────────────────────────┐
-│                        Streamlit Application                         │
+│                       Databricks App (apx)                           │
 │                                                                      │
-│  ┌──────────────┐  ┌──────────────┐  ┌────────────┐  ┌───────────┐  │
-│  │ Brand name   │  │ Target city  │  │ H3         │  │ POI       │  │
-│  │ or lat/lon   │  │ & country    │  │ resolution │  │ categories│  │
-│  └──────┬───────┘  └──────┬───────┘  └──────┬─────┘  └─────┬─────┘  │
-│         └────────┬────────┴─────────────────┴───────────────┘        │
-│                  ▼                                                    │
-│  ┌──────────────────────────────────────────────────────────────┐    │
-│  │        Brand Discovery (brand_search.py)                     │    │
-│  │                                                              │    │
-│  │  1. Databricks Genie: NL → SQL on gold_places_enriched      │    │
-│  │     (auto-provisions Genie Space if ID not set)              │    │
-│  │  2. h3_polyfillash3 city polygon → H3 cell filter            │    │
-│  │  3. Brand matching via ILIKE on brand_name / poi_name        │    │
-│  │  → brand locations (lat/lon + H3 hex cells)                  │    │
-│  └──────────────────────────┬───────────────────────────────────┘    │
-│                             ▼                                        │
-│  ┌──────────────────────────────────────────────────────────────┐    │
-│  │         DBSQL Queries on Gold Tables (pipeline.py)           │    │
-│  │                                                              │    │
-│  │  1. City polygon from gold_cities    (real boundary WKT)      │    │
-│  │  2. H3 tessellation via h3_polyfillash3 (polygon fill)       │    │
-│  │  3. POI lookup from gold_places (polygon-filtered via H3)    │    │
-│  │  4. Building lookup from gold_buildings (bbox + H3 join)     │    │
-│  │  5. Cross-city brand neighbourhood   (for external brands)   │    │
-│  └──────────────────────────┬───────────────────────────────────┘    │
-│                             ▼                                        │
-│  ┌──────────────────────────────────────────────────────────────┐    │
-│  │            SRAI Hex2Vec Embeddings (embeddings.py)           │    │
-│  │                                                              │    │
-│  │  • regions_gdf from H3 polygons                              │    │
-│  │  • features_gdf with one-hot POI + building categories       │    │
-│  │  • joint_gdf from DBSQL H3 assignment                        │    │
-│  │  • Pre-trained model: load + transform (fast)                 │    │
-│  │  • Fallback: Hex2VecEmbedder.fit_transform() (from scratch)  │    │
-│  └──────────────────────────┬───────────────────────────────────┘    │
-│                             ▼                                        │
-│  ┌──────────────────────────────────────────────────────────────┐    │
-│  │   Cosine Similarity + Opportunity Scoring (similarity.py)    │    │
-│  │                                                              │    │
-│  │  • Average brand-cell embeddings → brand profile             │    │
-│  │  • Cosine similarity vs all target-city cells                │    │
-│  │  • Competition penalty: opp = sim × (1 − β × comp_score)    │    │
-│  │  • POI density tiebreaking for equal scores                  │    │
-│  └──────────────────────────┬───────────────────────────────────┘    │
-│                             │                                        │
-│          ┌──────────────────┤                                        │
-│          ▼                  ▼                                        │
-│  ┌────────────────┐  ┌──────────────────────────────────────────┐    │
-│  │ Competition     │  │  Score Explainability (explainability.py)│    │
-│  │ Analysis        │  │                                          │    │
-│  │ (brand_search)  │  │  • Brand profile (avg POI counts)        │    │
-│  │                 │  │  • Category comparison vs brand average   │    │
-│  │ • Similar cells │  │  • Competition detail panel               │    │
-│  │ • gold_places   │  └──────────────────────────┬───────────────┘    │
-│  │   _enriched     │                             │                   │
-│  │ • LLM category  │                             │                   │
-│  │   filtering     │                             │                   │
-│  └────────┬────────┘                             │                   │
-│           └──────────────────┬───────────────────┘                   │
-│                              ▼                                       │
-│  ┌──────────────────────────────────────────────────────────────┐    │
-│  │             pydeck Map Visualisation (map_viz.py)            │    │
-│  │                                                              │    │
-│  │  • CARTO basemap                                             │    │
-│  │  • GeoJsonLayer — city polygon boundary outline              │    │
-│  │  • H3HexagonLayer — similarity heatmap                       │    │
-│  │  • ScatterplotLayer — existing locations (blue, density      │    │
-│  │    gradient: light→dark by brand count per cell)             │    │
-│  │  • ScatterplotLayer — top 2% opportunities (green)           │    │
-│  │  • Tooltips: contextual per layer (brand count, opp score,   │    │
-│  │    similarity, competitors, POI mix)                          │    │
-│  └──────────────────────────────────────────────────────────────┘    │
+│  ┌─────────────────────────────────────────────────────────────────┐  │
+│  │              React + TypeScript Frontend (Vite)                 │  │
+│  │                                                                 │  │
+│  │  ┌────────────────┐ ┌──────────────┐ ┌───────────────────────┐ │  │
+│  │  │ deck.gl Map    │ │ Config       │ │ Brand Profile Dialog  │ │  │
+│  │  │ (H3 heatmap,   │ │ Sidebar      │ │ (avg bar chart +     │ │  │
+│  │  │  brand dots,   │ │ (country,    │ │  per-location table)  │ │  │
+│  │  │  top opps,     │ │  city, POIs, │ │                       │ │  │
+│  │  │  city boundary)│ │  brand, β)   │ ├───────────────────────┤ │  │
+│  │  │                │ │              │ │ Fingerprint Panel     │ │  │
+│  │  │  Click any hex │ │  SSE progress│ │ (click any hexagon:   │ │  │
+│  │  │  → detail panel│ │  streaming   │ │  bar/line chart vs    │ │  │
+│  │  └────────────────┘ └──────────────┘ │  brand avg, scores,   │ │  │
+│  │                                      │  competition detail)  │ │  │
+│  │                                      └───────────────────────┘ │  │
+│  └─────────────────────────────────────────────────────────────────┘  │
+│                              │ /api/*                                 │
+│  ┌─────────────────────────────────────────────────────────────────┐  │
+│  │              FastAPI Backend (Python)                            │  │
+│  │                                                                 │  │
+│  │  GET /api/config         — H3 resolutions, POI category groups  │  │
+│  │  GET /api/countries      — available countries from gold_cities  │  │
+│  │  GET /api/cities         — cities for selected country           │  │
+│  │  POST /api/analyze       — SSE pipeline (tessellate, embed,     │  │
+│  │                            score, cache results)                 │  │
+│  │  GET /api/results/{id}   — cached analysis for map rendering    │  │
+│  │  GET /api/results/{id}/brand-profile — brand avg + breakdown    │  │
+│  │  GET /api/results/{id}/hexagon/{hex} — on-demand fingerprint    │  │
+│  └─────────────────────────────────────────────────────────────────┘  │
+│                              │                                       │
+│  ┌─────────────────────────────────────────────────────────────────┐  │
+│  │              Legacy Python Modules (bundled in wheel)            │  │
+│  │                                                                 │  │
+│  │  config.py       — gold table refs, categories, Genie Space ID  │  │
+│  │  pipeline.py     — DBSQL queries on gold tables                 │  │
+│  │  embeddings.py   — SRAI Hex2Vec embedding pipeline              │  │
+│  │  similarity.py   — cosine similarity + opportunity scoring      │  │
+│  │  brand_search.py — Genie brand discovery + competition          │  │
+│  │  explainability.py — score explanations + fingerprint data      │  │
+│  └─────────────────────────────────────────────────────────────────┘  │
 └───────────────────────────────────────────────────────────────────────┘
                               │
      ┌────────────────────────┼────────────────────────┐
@@ -141,7 +109,9 @@ enabling cross-city expansion analysis.
 | Databricks workspace | With access to a SQL Warehouse |
 | Databricks CLI | v0.239.0+ (for Asset Bundle deployment) |
 | CARTO Overture Maps catalogs | `carto_overture_maps_places`, `carto_overture_maps_divisions`, `carto_overture_maps_buildings` mounted via Delta Sharing |
-| Python | 3.11+ (used by the Databricks App runtime) |
+| Python | 3.11+ |
+| uv | Python package manager |
+| bun | JavaScript package manager (used by apx) |
 
 ### 1. Clone the repository
 
@@ -173,7 +143,7 @@ variables:
       warehouse: "Shared Endpoint"  # Change to your warehouse name
 ```
 
-Also update `src/app/app.yaml` to match:
+Also update `packages/app/app.yml` to match:
 
 ```yaml
 env:
@@ -190,11 +160,20 @@ env:
 ### 4. Deploy with Asset Bundles
 
 ```bash
-# Validate the bundle
-databricks bundle validate
+# Build the frontend and Python wheel
+uv run apx build
 
-# Deploy resources (app + ETL job)
+# Deploy bundle resources
 databricks bundle deploy
+
+# Upload build artifacts (needed because .build/ is gitignored)
+databricks workspace import-dir packages/app/.build \
+  "/Workspace/Users/<your-email>/.bundle/site-selection-accelerator/dev/files/packages/app/.build" \
+  --overwrite
+
+# Deploy the app
+databricks apps deploy site-selection-accelerator \
+  --source-code-path "/Workspace/Users/<your-email>/.bundle/site-selection-accelerator/dev/files/packages/app/.build"
 ```
 
 ### 5. Run the ETL job to populate gold tables
@@ -207,14 +186,46 @@ Space with spatial instructions.
 databricks bundle run geospatial_etl_job
 ```
 
-### 6. Start the application
-
-```bash
-databricks bundle run site_selection_app
-```
+### 6. Open the application
 
 After deployment, the Databricks Apps UI will show the application URL.
 Open it in your browser to start finding whitespace opportunities.
+
+---
+
+## Local Development
+
+The app uses [apx](https://github.com/databricks-solutions/apx), a toolkit
+for building full-stack Databricks Apps with React + FastAPI.
+
+```bash
+# Install Python dependencies
+uv sync
+
+# Install frontend dependencies
+uv run apx bun install
+
+# Create packages/app/.env with local dev settings:
+#   DATABRICKS_CONFIG_PROFILE=DEFAULT
+#   GOLD_CATALOG=your_catalog
+#   GOLD_SCHEMA=your_schema
+#   DATABRICKS_WAREHOUSE_ID=your_warehouse_id
+
+# Start dev servers (backend + frontend + OpenAPI watcher)
+uv run apx dev start
+
+# Check status
+uv run apx dev status
+
+# View logs
+uv run apx dev logs
+
+# Run type checks
+uv run apx dev check
+
+# Stop servers
+uv run apx dev stop
+```
 
 ---
 
@@ -245,7 +256,7 @@ details on why multi-city pre-training produces better embeddings.
 
 ### Step 2 — User Input
 
-The Streamlit sidebar collects:
+The collapsible sidebar collects:
 
 - **Brand name** (e.g. "Starbucks", "Premier Inn") — discovered via Genie.
   The Genie Space uses `h3_polyfillash3` to fill the city polygon with H3
@@ -341,16 +352,17 @@ alone cannot capture.
    `competition_score = competitor_count / max(competitor_count)`.
 8. Ranks cells by opportunity score, using **POI density** as a tiebreaker.
 
-### Step 7 — Map Visualisation (`map_viz.py`)
+### Step 7 — Interactive Map (deck.gl)
 
-Rendered with [pydeck](https://deckgl.readthedocs.io/) on a CARTO Positron
-basemap:
+The frontend renders a full-viewport interactive map using
+[deck.gl](https://deck.gl/) and [MapLibre GL](https://maplibre.org/) on a
+CARTO Positron basemap:
 
 | Layer | Description |
 |---|---|
 | **GeoJsonLayer** | City polygon boundary outline (when real polygon data is available) |
 | **H3HexagonLayer** | All candidate cells coloured by similarity score (red = high, blue = low) |
-| **ScatterplotLayer (blue)** | Existing brand locations snapped to H3 cell centres; colour gradient from light blue (1 location) to dark navy (max locations per cell). Pickable with brand count tooltip. |
+| **ScatterplotLayer (blue)** | Existing brand locations snapped to H3 cell centres; colour gradient from light blue (1 location) to dark navy (max locations per cell) |
 | **ScatterplotLayer (green)** | Top 2% opportunity locations by opportunity score + POI density |
 
 Hovering over any H3 cell shows a tooltip with:
@@ -361,31 +373,29 @@ Hovering over any H3 cell shows a tooltip with:
 - Feature mix breakdown showing the most distinctive categories as normalised
   percentages (within POI / Building types) vs the brand average
 
-Hovering over a brand location dot shows:
-- H3 cell ID
-- Number of brand locations in that cell
+**Clicking any hexagon** opens a slide-in fingerprint panel (see Step 8).
 
 ### Step 8 — Score Explainability (`explainability.py`)
 
 Rather than showing only a similarity percentage, the app provides interpretable
-explanations using the raw POI count vectors:
+explanations:
 
-- **Brand Location Profile** — displayed before the map as a horizontal bar
-  chart of average feature distributions across all brand cells, faceted by
-  feature type (POI vs. Building) with independent scales. Values are shown as
-  **% within type** so building counts don't overshadow POI counts.
-- **Enhanced tooltips** — hovering any hexagon on the map shows the top 4
+- **Brand Profile Dialog** — accessible via the sidebar after analysis
+  completes. Shows a bar chart of average feature distributions across all
+  brand cells, faceted by feature type (POI vs. Building) with independent
+  scales. Values are shown as **% within type** so building counts don't
+  overshadow POI counts. Also includes a per-location breakdown table.
+- **Hover tooltips** — hovering any hexagon on the map shows the top 4
   most distinctive categories as **% within feature type** (POI / Building
   normalised independently), sorted by largest deviation from the brand
   average. Directional arrows (▲/▼) indicate whether each category is above
   or below the brand profile.
-- **Category Fingerprint** — clicking any row in the Top 20 table reveals a
-  fingerprint chart showing **all** feature categories (POI + building) for the
+- **Hexagon Fingerprint Panel** — clicking **any hexagon** on the map opens a
+  slide-in panel showing all feature categories (POI + building) for the
   selected location versus the brand average. Users can toggle between **line
-  chart** (to compare distribution shapes) and **bar chart** modes, and between
-  raw **counts** and **% within type** (normalised) views. The normalised view
-  computes percentages independently for POIs and buildings, so neither type
-  dominates the chart.
+  chart** and **bar chart** modes, and between raw **counts** and **% within
+  type** (normalised) views. The panel also shows similarity score, opportunity
+  score, POI count, competition details, and a text explanation summary.
 
 ---
 
@@ -394,26 +404,44 @@ explanations using the raw POI count vectors:
 ```
 site_selection_accelerator/
 ├── databricks.yml                    # Asset Bundle config (catalog, schema, warehouse)
+├── pyproject.toml                    # Root uv workspace config
 ├── README.md                         # This file
 ├── HEX2VEC_EXPLAINER.md             # Deep dive into the Hex2Vec algorithm
 ├── INTEGRATION_PLAN.md              # Detailed technical notes
 ├── resources/
 │   ├── site_selection_app.yml        # Databricks App resource definition
 │   └── geospatial_etl_job.yml        # ETL job: SQL + Python tasks
+├── packages/app/                     # apx full-stack application
+│   ├── app.yml                       # App runtime config (command, env vars)
+│   ├── pyproject.toml                # Python dependencies + build config
+│   ├── package.json                  # Frontend dependencies
+│   ├── .env                          # Local dev env vars (not committed)
+│   └── src/site_selection/
+│       ├── backend/
+│       │   ├── app.py                # FastAPI app entry point
+│       │   ├── router.py             # API routes (config, analyze SSE, results, fingerprint)
+│       │   ├── models.py             # Pydantic request/response models
+│       │   ├── cache.py              # In-memory session cache for pipeline results
+│       │   └── core/                 # App factory, config, dependencies
+│       └── ui/
+│           ├── routes/index.tsx      # Main page: map + sidebar + dialogs
+│           ├── components/
+│           │   ├── map/              # deck.gl map with H3, scatterplot, GeoJSON layers
+│           │   ├── sidebar/          # Collapsible config panel with SSE progress
+│           │   ├── brand-profile/    # Brand profile dialog (avg chart + breakdown)
+│           │   └── fingerprint/      # Hexagon detail slide-in panel
+│           └── lib/
+│               ├── types.ts          # TypeScript interfaces matching Pydantic models
+│               └── use-analyze.ts    # React hook for SSE-based pipeline execution
 └── src/
-    ├── app/
-    │   ├── app.yaml                  # App runtime config (command, env vars)
-    │   ├── requirements.txt          # Python dependencies
-    │   ├── .env                      # Local dev env vars (not committed)
-    │   ├── app.py                    # Streamlit UI + orchestration
+    ├── app/                          # Legacy Python modules (reused by backend)
     │   ├── config.py                 # Gold table refs, categories, Genie Space ID
     │   ├── db.py                     # SQL execution via Databricks SDK Statement API
-    │   ├── pipeline.py               # DBSQL queries on gold tables + polygon-aware POI filter
+    │   ├── pipeline.py               # DBSQL queries on gold tables
     │   ├── embeddings.py             # SRAI Hex2Vec embedding pipeline
     │   ├── similarity.py             # Cosine similarity + opportunity scoring
     │   ├── brand_search.py           # Brand discovery (Genie) + competition analysis
-    │   ├── explainability.py         # Score explainability + competition detail
-    │   └── map_viz.py                # pydeck map (heatmap + city boundary outline)
+    │   └── explainability.py         # Score explainability + competition detail
     └── pipeline/
         ├── setup_genie_space.py      # Genie Space provisioning (create/update/persist)
         ├── train_hex2vec.py          # Multi-city Hex2Vec pre-training (DAB job task)
@@ -441,16 +469,25 @@ site_selection_accelerator/
 | `ST_Union(geom1, geom2)` | Merge two geometries into one (used to combine multi-level polygons) |
 | `ST_AsText(geom)` | Convert geometry to WKT string |
 
+### Frontend Libraries
+
+| Library | Purpose |
+|---|---|
+| `deck.gl` / `@deck.gl/react` | WebGL map rendering with H3, scatterplot, and GeoJSON layers |
+| `react-map-gl` + `maplibre-gl` | Basemap integration with MapLibre GL |
+| `recharts` | React charting library for brand profile and fingerprint charts |
+| `shadcn/ui` | UI component library (dialogs, sheets, selects, sliders, etc.) |
+| `@tanstack/react-router` | File-based routing for React |
+
 ### Python Libraries
 
 | Library | Purpose |
 |---|---|
+| `fastapi` | API backend with SSE streaming for long-running pipeline |
 | `srai` (Hex2VecEmbedder) | Learned dense geospatial embeddings from POI tag patterns |
 | `h3` | Client-side H3 cell ↔ polygon conversions, k-ring neighbourhoods |
 | `geopandas` / `shapely` | GeoDataFrame construction for SRAI |
 | `scikit-learn` | `cosine_similarity` for scoring |
-| `altair` | Vega-Lite charts for brand profile and explainability panels |
-| `pydeck` | Deck.gl map rendering in Streamlit |
 | `geopy` | Optional address geocoding via Nominatim |
 | `databricks-sdk` | Workspace auth, SQL Statement Execution API, Genie API, Foundation Model API |
 | `python-dotenv` | Load `.env` variables for local development |
@@ -460,7 +497,7 @@ site_selection_accelerator/
 ## Extending the Accelerator
 
 - **Change catalog/schema** — update `databricks.yml` variables and
-  `src/app/app.yaml` env vars (`GOLD_CATALOG`, `GOLD_SCHEMA`), then re-run
+  `packages/app/app.yml` env vars (`GOLD_CATALOG`, `GOLD_SCHEMA`), then re-run
   the ETL job.
 - **Add new POI categories** — edit `CATEGORY_GROUPS` in `config.py` and the
   `WHERE` clause in `gold_places.sql`, then re-run the ETL job.
@@ -492,7 +529,8 @@ site_selection_accelerator/
 | Genie returns empty results | Check that `gold_places_enriched` exists and the Genie Space has correct instructions. Run `setup_genie_space.py` to recreate. |
 | Slow embedding training | Reduce H3 resolution (fewer cells) or reduce `max_epochs` in `embeddings.py`. |
 | SQL warehouse timeout | Increase the timeout on your warehouse or use a larger warehouse size. |
-| App deployment fails | Check the Logs tab in the Databricks Apps UI. Verify `DATABRICKS_WAREHOUSE_ID` and gold table env vars are set. |
+| App deployment fails | Check the Logs tab in the Databricks Apps UI. Verify `DATABRICKS_WAREHOUSE_ID` and gold table env vars are set in `packages/app/app.yml`. |
+| Dropdowns empty in deployed app | Ensure legacy modules are bundled: `pyproject.toml` should have `[tool.hatch.build.targets.wheel.force-include]` mapping `../../src/app` to `site_selection/_legacy`. |
 
 ---
 

@@ -1,0 +1,552 @@
+import { useQuery, useSuspenseQuery, useMutation } from "@tanstack/react-query";
+import type { UseQueryOptions, UseSuspenseQueryOptions, UseMutationOptions } from "@tanstack/react-query";
+export class ApiError extends Error {
+    status: number;
+    statusText: string;
+    body: unknown;
+    constructor(status: number, statusText: string, body: unknown){
+        super(`HTTP ${status}: ${statusText}`);
+        this.name = "ApiError";
+        this.status = status;
+        this.statusText = statusText;
+        this.body = body;
+    }
+}
+export interface AnalyzeRequest {
+    beta?: number;
+    brand_input: BrandInput;
+    categories: string[];
+    city: string;
+    country: string;
+    enable_competition?: boolean;
+    include_buildings?: boolean;
+    resolution?: number;
+}
+export interface AnalyzeResultOut {
+    brand_locations: BrandLocationData[];
+    center_lat: number;
+    center_lon: number;
+    city_polygon_geojson?: Record<string, unknown> | null;
+    has_competition?: boolean;
+    hexagons: HexagonData[];
+    session_id: string;
+}
+export interface AppConfigOut {
+    building_category_groups: CategoryGroup[];
+    category_groups: CategoryGroup[];
+    default_resolution: number;
+    h3_resolutions: number[];
+}
+export interface BrandInput {
+    mode: string;
+    value: string;
+}
+export interface BrandLocationData {
+    count?: number;
+    hex_id: string;
+    lat: number;
+    lon: number;
+}
+export interface BrandProfileOut {
+    avg_profile: CategoryAvgItem[];
+    cell_breakdown: CellBreakdownRow[];
+}
+export interface CategoryAvgItem {
+    avg_count: number;
+    category: string;
+    feature_type: string;
+    group: string;
+    pct_within_type: number;
+}
+export interface CategoryGroup {
+    categories: string[];
+    name: string;
+}
+export interface CellBreakdownRow {
+    category: string;
+    count: number;
+    location: string;
+}
+export interface CompetitionInfo {
+    competition_score: number;
+    competitor_count: number;
+    opportunity_score: number;
+    top_competitors: string;
+    vibe_score: number;
+}
+export interface FingerprintRow {
+    brand_average: number;
+    brand_average_pct: number;
+    category: string;
+    feature_type: string;
+    group: string;
+    this_location: number;
+    this_location_pct: number;
+}
+export interface HTTPValidationError {
+    detail?: ValidationError[];
+}
+export interface HexagonData {
+    address?: string;
+    cat_detail?: string;
+    competitor_count?: number;
+    h3_cell: number;
+    hex_id: string;
+    is_brand_cell: boolean;
+    lat: number;
+    lon: number;
+    opportunity_score?: number | null;
+    poi_count?: number;
+    similarity: number;
+    top_competitors?: string;
+}
+export interface HexagonDetailOut {
+    address: string;
+    competition?: CompetitionInfo | null;
+    explanation_summary?: string;
+    fingerprint: FingerprintRow[];
+    h3_cell: number;
+    hex_id: string;
+    opportunity_score?: number | null;
+    poi_count?: number;
+    similarity: number;
+}
+export interface ValidationError {
+    ctx?: Record<string, unknown>;
+    input?: unknown;
+    loc: (string | number)[];
+    msg: string;
+    type: string;
+}
+export interface VersionOut {
+    version: string;
+}
+export const analyze = async (data: AnalyzeRequest, options?: RequestInit): Promise<{
+    data: unknown;
+}> =>{
+    const res = await fetch("/api/analyze", {
+        ...options,
+        method: "POST",
+        headers: {
+            "Content-Type": "application/json",
+            ...options?.headers
+        },
+        body: JSON.stringify(data)
+    });
+    if (!res.ok) {
+        const body = await res.text();
+        let parsed: unknown;
+        try {
+            parsed = JSON.parse(body);
+        } catch  {
+            parsed = body;
+        }
+        throw new ApiError(res.status, res.statusText, parsed);
+    }
+    return {
+        data: await res.json()
+    };
+};
+export function useAnalyze(options?: {
+    mutation?: UseMutationOptions<{
+        data: unknown;
+    }, ApiError, AnalyzeRequest>;
+}) {
+    return useMutation({
+        mutationFn: (data)=>analyze(data),
+        ...options?.mutation
+    });
+}
+export interface ListCitiesParams {
+    country: string;
+}
+export const listCities = async (params: ListCitiesParams, options?: RequestInit): Promise<{
+    data: string[];
+}> =>{
+    const searchParams = new URLSearchParams();
+    if (params.country != null) searchParams.set("country", String(params.country));
+    const queryString = searchParams.toString();
+    const url = queryString ? `/api/cities?${queryString}` : "/api/cities";
+    const res = await fetch(url, {
+        ...options,
+        method: "GET"
+    });
+    if (!res.ok) {
+        const body = await res.text();
+        let parsed: unknown;
+        try {
+            parsed = JSON.parse(body);
+        } catch  {
+            parsed = body;
+        }
+        throw new ApiError(res.status, res.statusText, parsed);
+    }
+    return {
+        data: await res.json()
+    };
+};
+export const listCitiesKey = (params?: ListCitiesParams)=>{
+    return [
+        "/api/cities",
+        params
+    ] as const;
+};
+export function useListCities<TData = {
+    data: string[];
+}>(options: {
+    params: ListCitiesParams;
+    query?: Omit<UseQueryOptions<{
+        data: string[];
+    }, ApiError, TData>, "queryKey" | "queryFn">;
+}) {
+    return useQuery({
+        queryKey: listCitiesKey(options.params),
+        queryFn: ()=>listCities(options.params),
+        ...options?.query
+    });
+}
+export function useListCitiesSuspense<TData = {
+    data: string[];
+}>(options: {
+    params: ListCitiesParams;
+    query?: Omit<UseSuspenseQueryOptions<{
+        data: string[];
+    }, ApiError, TData>, "queryKey" | "queryFn">;
+}) {
+    return useSuspenseQuery({
+        queryKey: listCitiesKey(options.params),
+        queryFn: ()=>listCities(options.params),
+        ...options?.query
+    });
+}
+export const getConfig = async (options?: RequestInit): Promise<{
+    data: AppConfigOut;
+}> =>{
+    const res = await fetch("/api/config", {
+        ...options,
+        method: "GET"
+    });
+    if (!res.ok) {
+        const body = await res.text();
+        let parsed: unknown;
+        try {
+            parsed = JSON.parse(body);
+        } catch  {
+            parsed = body;
+        }
+        throw new ApiError(res.status, res.statusText, parsed);
+    }
+    return {
+        data: await res.json()
+    };
+};
+export const getConfigKey = ()=>{
+    return [
+        "/api/config"
+    ] as const;
+};
+export function useGetConfig<TData = {
+    data: AppConfigOut;
+}>(options?: {
+    query?: Omit<UseQueryOptions<{
+        data: AppConfigOut;
+    }, ApiError, TData>, "queryKey" | "queryFn">;
+}) {
+    return useQuery({
+        queryKey: getConfigKey(),
+        queryFn: ()=>getConfig(),
+        ...options?.query
+    });
+}
+export function useGetConfigSuspense<TData = {
+    data: AppConfigOut;
+}>(options?: {
+    query?: Omit<UseSuspenseQueryOptions<{
+        data: AppConfigOut;
+    }, ApiError, TData>, "queryKey" | "queryFn">;
+}) {
+    return useSuspenseQuery({
+        queryKey: getConfigKey(),
+        queryFn: ()=>getConfig(),
+        ...options?.query
+    });
+}
+export const listCountries = async (options?: RequestInit): Promise<{
+    data: string[];
+}> =>{
+    const res = await fetch("/api/countries", {
+        ...options,
+        method: "GET"
+    });
+    if (!res.ok) {
+        const body = await res.text();
+        let parsed: unknown;
+        try {
+            parsed = JSON.parse(body);
+        } catch  {
+            parsed = body;
+        }
+        throw new ApiError(res.status, res.statusText, parsed);
+    }
+    return {
+        data: await res.json()
+    };
+};
+export const listCountriesKey = ()=>{
+    return [
+        "/api/countries"
+    ] as const;
+};
+export function useListCountries<TData = {
+    data: string[];
+}>(options?: {
+    query?: Omit<UseQueryOptions<{
+        data: string[];
+    }, ApiError, TData>, "queryKey" | "queryFn">;
+}) {
+    return useQuery({
+        queryKey: listCountriesKey(),
+        queryFn: ()=>listCountries(),
+        ...options?.query
+    });
+}
+export function useListCountriesSuspense<TData = {
+    data: string[];
+}>(options?: {
+    query?: Omit<UseSuspenseQueryOptions<{
+        data: string[];
+    }, ApiError, TData>, "queryKey" | "queryFn">;
+}) {
+    return useSuspenseQuery({
+        queryKey: listCountriesKey(),
+        queryFn: ()=>listCountries(),
+        ...options?.query
+    });
+}
+export interface GetResultsParams {
+    session_id: string;
+}
+export const getResults = async (params: GetResultsParams, options?: RequestInit): Promise<{
+    data: AnalyzeResultOut;
+}> =>{
+    const res = await fetch(`/api/results/${params.session_id}`, {
+        ...options,
+        method: "GET"
+    });
+    if (!res.ok) {
+        const body = await res.text();
+        let parsed: unknown;
+        try {
+            parsed = JSON.parse(body);
+        } catch  {
+            parsed = body;
+        }
+        throw new ApiError(res.status, res.statusText, parsed);
+    }
+    return {
+        data: await res.json()
+    };
+};
+export const getResultsKey = (params?: GetResultsParams)=>{
+    return [
+        "/api/results/{session_id}",
+        params
+    ] as const;
+};
+export function useGetResults<TData = {
+    data: AnalyzeResultOut;
+}>(options: {
+    params: GetResultsParams;
+    query?: Omit<UseQueryOptions<{
+        data: AnalyzeResultOut;
+    }, ApiError, TData>, "queryKey" | "queryFn">;
+}) {
+    return useQuery({
+        queryKey: getResultsKey(options.params),
+        queryFn: ()=>getResults(options.params),
+        ...options?.query
+    });
+}
+export function useGetResultsSuspense<TData = {
+    data: AnalyzeResultOut;
+}>(options: {
+    params: GetResultsParams;
+    query?: Omit<UseSuspenseQueryOptions<{
+        data: AnalyzeResultOut;
+    }, ApiError, TData>, "queryKey" | "queryFn">;
+}) {
+    return useSuspenseQuery({
+        queryKey: getResultsKey(options.params),
+        queryFn: ()=>getResults(options.params),
+        ...options?.query
+    });
+}
+export interface GetBrandProfileParams {
+    session_id: string;
+}
+export const getBrandProfile = async (params: GetBrandProfileParams, options?: RequestInit): Promise<{
+    data: BrandProfileOut;
+}> =>{
+    const res = await fetch(`/api/results/${params.session_id}/brand-profile`, {
+        ...options,
+        method: "GET"
+    });
+    if (!res.ok) {
+        const body = await res.text();
+        let parsed: unknown;
+        try {
+            parsed = JSON.parse(body);
+        } catch  {
+            parsed = body;
+        }
+        throw new ApiError(res.status, res.statusText, parsed);
+    }
+    return {
+        data: await res.json()
+    };
+};
+export const getBrandProfileKey = (params?: GetBrandProfileParams)=>{
+    return [
+        "/api/results/{session_id}/brand-profile",
+        params
+    ] as const;
+};
+export function useGetBrandProfile<TData = {
+    data: BrandProfileOut;
+}>(options: {
+    params: GetBrandProfileParams;
+    query?: Omit<UseQueryOptions<{
+        data: BrandProfileOut;
+    }, ApiError, TData>, "queryKey" | "queryFn">;
+}) {
+    return useQuery({
+        queryKey: getBrandProfileKey(options.params),
+        queryFn: ()=>getBrandProfile(options.params),
+        ...options?.query
+    });
+}
+export function useGetBrandProfileSuspense<TData = {
+    data: BrandProfileOut;
+}>(options: {
+    params: GetBrandProfileParams;
+    query?: Omit<UseSuspenseQueryOptions<{
+        data: BrandProfileOut;
+    }, ApiError, TData>, "queryKey" | "queryFn">;
+}) {
+    return useSuspenseQuery({
+        queryKey: getBrandProfileKey(options.params),
+        queryFn: ()=>getBrandProfile(options.params),
+        ...options?.query
+    });
+}
+export interface GetHexagonDetailParams {
+    session_id: string;
+    hex_id: string;
+}
+export const getHexagonDetail = async (params: GetHexagonDetailParams, options?: RequestInit): Promise<{
+    data: HexagonDetailOut;
+}> =>{
+    const res = await fetch(`/api/results/${params.session_id}/hexagon/${params.hex_id}`, {
+        ...options,
+        method: "GET"
+    });
+    if (!res.ok) {
+        const body = await res.text();
+        let parsed: unknown;
+        try {
+            parsed = JSON.parse(body);
+        } catch  {
+            parsed = body;
+        }
+        throw new ApiError(res.status, res.statusText, parsed);
+    }
+    return {
+        data: await res.json()
+    };
+};
+export const getHexagonDetailKey = (params?: GetHexagonDetailParams)=>{
+    return [
+        "/api/results/{session_id}/hexagon/{hex_id}",
+        params
+    ] as const;
+};
+export function useGetHexagonDetail<TData = {
+    data: HexagonDetailOut;
+}>(options: {
+    params: GetHexagonDetailParams;
+    query?: Omit<UseQueryOptions<{
+        data: HexagonDetailOut;
+    }, ApiError, TData>, "queryKey" | "queryFn">;
+}) {
+    return useQuery({
+        queryKey: getHexagonDetailKey(options.params),
+        queryFn: ()=>getHexagonDetail(options.params),
+        ...options?.query
+    });
+}
+export function useGetHexagonDetailSuspense<TData = {
+    data: HexagonDetailOut;
+}>(options: {
+    params: GetHexagonDetailParams;
+    query?: Omit<UseSuspenseQueryOptions<{
+        data: HexagonDetailOut;
+    }, ApiError, TData>, "queryKey" | "queryFn">;
+}) {
+    return useSuspenseQuery({
+        queryKey: getHexagonDetailKey(options.params),
+        queryFn: ()=>getHexagonDetail(options.params),
+        ...options?.query
+    });
+}
+export const version = async (options?: RequestInit): Promise<{
+    data: VersionOut;
+}> =>{
+    const res = await fetch("/api/version", {
+        ...options,
+        method: "GET"
+    });
+    if (!res.ok) {
+        const body = await res.text();
+        let parsed: unknown;
+        try {
+            parsed = JSON.parse(body);
+        } catch  {
+            parsed = body;
+        }
+        throw new ApiError(res.status, res.statusText, parsed);
+    }
+    return {
+        data: await res.json()
+    };
+};
+export const versionKey = ()=>{
+    return [
+        "/api/version"
+    ] as const;
+};
+export function useVersion<TData = {
+    data: VersionOut;
+}>(options?: {
+    query?: Omit<UseQueryOptions<{
+        data: VersionOut;
+    }, ApiError, TData>, "queryKey" | "queryFn">;
+}) {
+    return useQuery({
+        queryKey: versionKey(),
+        queryFn: ()=>version(),
+        ...options?.query
+    });
+}
+export function useVersionSuspense<TData = {
+    data: VersionOut;
+}>(options?: {
+    query?: Omit<UseSuspenseQueryOptions<{
+        data: VersionOut;
+    }, ApiError, TData>, "queryKey" | "queryFn">;
+}) {
+    return useSuspenseQuery({
+        queryKey: versionKey(),
+        queryFn: ()=>version(),
+        ...options?.query
+    });
+}

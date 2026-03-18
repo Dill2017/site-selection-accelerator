@@ -99,7 +99,6 @@ def _ask_genie(question: str, timeout_seconds: int = 120) -> pd.DataFrame:
     Genie generates the SQL; we then execute it via the DBSQL connector
     (from db.py) to get full, reliable results.
     """
-    import streamlit as st
     from db import execute_query
 
     space_id = _ensure_genie_space()
@@ -115,12 +114,10 @@ def _ask_genie(question: str, timeout_seconds: int = 120) -> pd.DataFrame:
         )
     except Exception as e:
         log.error("Genie conversation failed: %s", e)
-        st.error(f"Genie API error: {type(e).__name__}: {e}")
         return pd.DataFrame()
 
     if not msg.attachments:
         log.warning("Genie returned no attachments for: %s", question[:80])
-        st.warning("Genie returned no SQL — it may need more instructions.")
         return pd.DataFrame()
 
     for attachment in msg.attachments:
@@ -135,7 +132,6 @@ def _ask_genie(question: str, timeout_seconds: int = 120) -> pd.DataFrame:
                 return df
             except Exception as e:
                 log.error("Failed to execute Genie SQL: %s", e)
-                st.error(f"Genie SQL execution failed: {e}")
                 return pd.DataFrame()
 
     log.warning("Genie attachments had no query for: %s", question[:80])

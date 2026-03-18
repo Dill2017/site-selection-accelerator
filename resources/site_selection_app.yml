@@ -3,7 +3,7 @@ resources:
     site_selection_app:
       name: "site-selection-accelerator"
       description: "Brand Site Selection Accelerator — find whitespace opportunities using geospatial embeddings"
-      source_code_path: ../src/app
+      source_code_path: ../packages/app/.build
       resources:
         - name: "sql-warehouse"
           sql_warehouse:

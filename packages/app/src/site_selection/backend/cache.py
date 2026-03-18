@@ -1,0 +1,58 @@
+"""In-memory result cache for pipeline outputs.
+
+Keyed by session_id so the frontend can query any hexagon's
+fingerprint on demand after a pipeline run completes.
+"""
+
+from __future__ import annotations
+
+import threading
+import time
+import uuid
+from dataclasses import dataclass, field
+
+import pandas as pd
+
+
+@dataclass
+class PipelineResult:
+    count_vectors: pd.DataFrame
+    brand_avg: pd.Series
+    brand_profile: dict
+    scored: pd.DataFrame
+    address_lookup: dict[int, str]
+    brand_locations: list[dict]
+    city_h3_cells_df: pd.DataFrame
+    competitor_pois: pd.DataFrame | None
+    city_polygon_wkt: str | None
+    created_at: float = field(default_factory=time.time)
+
+
+_lock = threading.Lock()
+_store: dict[str, PipelineResult] = {}
+
+MAX_SESSIONS = 20
+TTL_SECONDS = 3600
+
+
+def save(result: PipelineResult) -> str:
+    session_id = uuid.uuid4().hex[:12]
+    with _lock:
+        _store[session_id] = result
+        _evict()
+    return session_id
+
+
+def get(session_id: str) -> PipelineResult | None:
+    with _lock:
+        return _store.get(session_id)
+
+
+def _evict() -> None:
+    now = time.time()
+    expired = [k for k, v in _store.items() if now - v.created_at > TTL_SECONDS]
+    for k in expired:
+        del _store[k]
+    while len(_store) > MAX_SESSIONS:
+        oldest = min(_store, key=lambda k: _store[k].created_at)
+        del _store[oldest]
