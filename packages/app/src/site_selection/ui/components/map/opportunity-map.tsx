@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Map, type MapRef } from "react-map-gl/maplibre";
-import { DeckGL } from "@deck.gl/react";
+import { Map, useControl, type MapRef } from "react-map-gl/maplibre";
+import { MapboxOverlay } from "@deck.gl/mapbox";
 import { H3HexagonLayer } from "@deck.gl/geo-layers";
 import { ScatterplotLayer, GeoJsonLayer } from "@deck.gl/layers";
-import type { PickingInfo } from "@deck.gl/core";
+import type { PickingInfo, Layer } from "@deck.gl/core";
 import type { HexagonData, BrandLocationData, DrawingMode } from "@/lib/types";
 import { DrawToolbar } from "./draw-toolbar";
 import "maplibre-gl/dist/maplibre-gl.css";
@@ -19,6 +19,16 @@ function scoreToColor(score: number): [number, number, number, number] {
   const g = Math.round(Math.min(2 - score * 2, 1) * 150);
   const b = Math.round((1 - score) * 200);
   return [r, g, b, 140];
+}
+
+function DeckGLOverlay(props: {
+  layers: Layer[];
+  onHover?: (info: PickingInfo) => void;
+  onClick?: (info: PickingInfo) => void;
+}) {
+  const overlay = useControl(() => new MapboxOverlay({ interleaved: false }));
+  overlay.setProps(props);
+  return null;
 }
 
 interface OpportunityMapProps {
@@ -55,8 +65,6 @@ export function OpportunityMap({
   onUndoDrawing,
 }: OpportunityMapProps) {
   const mapRef = useRef<MapRef>(null);
-  const containerRef = useRef<HTMLDivElement>(null);
-  const [mapReady, setMapReady] = useState(false);
   const [hoverInfo, setHoverInfo] = useState<{
     x: number;
     y: number;
@@ -112,31 +120,14 @@ export function OpportunityMap({
   );
 
   const handleMapLoad = useCallback(() => {
-    setMapReady(true);
-  }, []);
-
-  useEffect(() => {
-    if (mapReady && mapRef.current && onMapReady) {
+    if (mapRef.current && onMapReady) {
       onMapReady(mapRef.current.getMap() as unknown as maplibregl.Map);
     }
-  }, [mapReady, onMapReady]);
+  }, [onMapReady]);
 
-  const isActivelyDrawing = drawingEnabled && drawingMode !== "navigate";
-
-  useEffect(() => {
-    if (!containerRef.current) return;
-    const maplibreCanvas = containerRef.current.querySelector(".maplibregl-canvas");
-    const allCanvases = containerRef.current.querySelectorAll("canvas");
-    for (const canvas of allCanvases) {
-      if (canvas !== maplibreCanvas) {
-        (canvas as HTMLElement).style.pointerEvents = isActivelyDrawing ? "none" : "";
-      }
-    }
-  }, [isActivelyDrawing]);
-
-  const layers = useMemo(() => {
+  const layers = useMemo((): Layer[] => {
     if (!hasResults) return [];
-    const result = [];
+    const result: Layer[] = [];
 
     if (cityPolygonGeoJson) {
       result.push(
@@ -167,7 +158,6 @@ export function OpportunityMap({
         extruded: false,
         pickable: true,
         opacity: 0.7,
-        onHover: handleHover,
       }),
     );
 
@@ -203,29 +193,40 @@ export function OpportunityMap({
     );
 
     return result;
-  }, [hasResults, whitespace, brandLocations, topOpps, cityPolygonGeoJson, handleHover]);
+  }, [hasResults, whitespace, brandLocations, topOpps, cityPolygonGeoJson]);
 
-  const getCursor = useCallback(
-    ({ isHovering }: { isHovering: boolean }) => {
-      if (drawingEnabled && (drawingMode === "point" || drawingMode === "polygon")) {
-        return "crosshair";
-      }
-      return isHovering ? "pointer" : "grab";
-    },
-    [drawingEnabled, drawingMode],
-  );
+  const isActivelyDrawing = drawingEnabled && drawingMode !== "navigate";
+
+  const cursorStyle = useMemo(() => {
+    if (isActivelyDrawing) return "crosshair";
+    return "";
+  }, [isActivelyDrawing]);
+
+  useEffect(() => {
+    if (!mapRef.current) return;
+    const canvas = mapRef.current.getCanvas();
+    if (cursorStyle) {
+      canvas.style.cursor = cursorStyle;
+    } else {
+      canvas.style.cursor = "";
+    }
+  }, [cursorStyle]);
 
   return (
-    <div ref={containerRef} className="relative w-full h-full">
-      <DeckGL
+    <div className="relative w-full h-full">
+      <Map
+        ref={mapRef}
         initialViewState={initialViewState}
-        controller={true}
-        layers={layers}
-        onClick={handleClick}
-        getCursor={getCursor}
+        mapStyle={CARTO_BASEMAP}
+        onLoad={handleMapLoad}
+        cursor={isActivelyDrawing ? "crosshair" : undefined}
       >
-        <Map ref={mapRef} mapStyle={CARTO_BASEMAP} onLoad={handleMapLoad} />
-      </DeckGL>
+        <DeckGLOverlay
+          layers={layers}
+          onHover={handleHover}
+          onClick={handleClick}
+        />
+      </Map>
 
       {hoverInfo && (
         <div
