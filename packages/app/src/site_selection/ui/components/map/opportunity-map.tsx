@@ -1,14 +1,18 @@
-import { useCallback, useMemo, useState } from "react";
-import { Map } from "react-map-gl/maplibre";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Map, type MapRef } from "react-map-gl/maplibre";
 import { DeckGL } from "@deck.gl/react";
 import { H3HexagonLayer } from "@deck.gl/geo-layers";
 import { ScatterplotLayer, GeoJsonLayer } from "@deck.gl/layers";
 import type { PickingInfo } from "@deck.gl/core";
-import type { HexagonData, BrandLocationData } from "@/lib/types";
+import type { HexagonData, BrandLocationData, DrawingMode } from "@/lib/types";
+import { DrawToolbar } from "./draw-toolbar";
 import "maplibre-gl/dist/maplibre-gl.css";
 
 const CARTO_BASEMAP =
   "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json";
+
+const DEFAULT_CENTER = { lat: 51.5074, lon: -0.1278 };
+const DEFAULT_ZOOM = 5;
 
 function scoreToColor(score: number): [number, number, number, number] {
   const r = Math.round(Math.min(score * 2, 1) * 255);
@@ -18,39 +22,57 @@ function scoreToColor(score: number): [number, number, number, number] {
 }
 
 interface OpportunityMapProps {
-  hexagons: HexagonData[];
-  brandLocations: BrandLocationData[];
-  cityPolygonGeoJson: Record<string, unknown> | null;
-  centerLat: number;
-  centerLon: number;
-  hasCompetition: boolean;
-  onHexClick: (hex: HexagonData) => void;
+  hexagons?: HexagonData[];
+  brandLocations?: BrandLocationData[];
+  cityPolygonGeoJson?: Record<string, unknown> | null;
+  centerLat?: number;
+  centerLon?: number;
+  hasCompetition?: boolean;
+  onHexClick?: (hex: HexagonData) => void;
+  onMapReady?: (map: maplibregl.Map) => void;
+  drawingEnabled?: boolean;
+  drawingMode?: DrawingMode;
+  onDrawingModeChange?: (mode: DrawingMode) => void;
+  drawnFeatureCounts?: { points: number; polygons: number };
+  onClearDrawing?: () => void;
+  onUndoDrawing?: () => void;
 }
 
 export function OpportunityMap({
-  hexagons,
-  brandLocations,
-  cityPolygonGeoJson,
+  hexagons = [],
+  brandLocations = [],
+  cityPolygonGeoJson = null,
   centerLat,
   centerLon,
-  hasCompetition,
+  hasCompetition = false,
   onHexClick,
+  onMapReady,
+  drawingEnabled = false,
+  drawingMode = "navigate",
+  onDrawingModeChange,
+  drawnFeatureCounts = { points: 0, polygons: 0 },
+  onClearDrawing,
+  onUndoDrawing,
 }: OpportunityMapProps) {
+  const mapRef = useRef<MapRef>(null);
+  const [mapReady, setMapReady] = useState(false);
   const [hoverInfo, setHoverInfo] = useState<{
     x: number;
     y: number;
     hex: HexagonData;
   } | null>(null);
 
+  const hasResults = hexagons.length > 0;
+
   const initialViewState = useMemo(
     () => ({
-      latitude: centerLat,
-      longitude: centerLon,
-      zoom: 11,
+      latitude: centerLat ?? DEFAULT_CENTER.lat,
+      longitude: centerLon ?? DEFAULT_CENTER.lon,
+      zoom: hasResults ? 11 : DEFAULT_ZOOM,
       pitch: 0,
       bearing: 0,
     }),
-    [centerLat, centerLon],
+    [centerLat, centerLon, hasResults],
   );
 
   const whitespace = useMemo(
@@ -81,14 +103,25 @@ export function OpportunityMap({
 
   const handleClick = useCallback(
     (info: PickingInfo) => {
-      if (info.object && info.layer?.id === "h3-heatmap") {
+      if (info.object && info.layer?.id === "h3-heatmap" && onHexClick) {
         onHexClick(info.object as HexagonData);
       }
     },
     [onHexClick],
   );
 
+  const handleMapLoad = useCallback(() => {
+    setMapReady(true);
+  }, []);
+
+  useEffect(() => {
+    if (mapReady && mapRef.current && onMapReady) {
+      onMapReady(mapRef.current.getMap() as unknown as maplibregl.Map);
+    }
+  }, [mapReady, onMapReady]);
+
   const layers = useMemo(() => {
+    if (!hasResults) return [];
     const result = [];
 
     if (cityPolygonGeoJson) {
@@ -156,7 +189,17 @@ export function OpportunityMap({
     );
 
     return result;
-  }, [whitespace, brandLocations, topOpps, cityPolygonGeoJson, handleHover]);
+  }, [hasResults, whitespace, brandLocations, topOpps, cityPolygonGeoJson, handleHover]);
+
+  const getCursor = useCallback(
+    ({ isHovering }: { isHovering: boolean }) => {
+      if (drawingEnabled && (drawingMode === "point" || drawingMode === "polygon")) {
+        return "crosshair";
+      }
+      return isHovering ? "pointer" : "grab";
+    },
+    [drawingEnabled, drawingMode],
+  );
 
   return (
     <div className="relative w-full h-full">
@@ -165,9 +208,9 @@ export function OpportunityMap({
         controller={true}
         layers={layers}
         onClick={handleClick}
-        getCursor={({ isHovering }) => (isHovering ? "pointer" : "grab")}
+        getCursor={getCursor}
       >
-        <Map mapStyle={CARTO_BASEMAP} />
+        <Map ref={mapRef} mapStyle={CARTO_BASEMAP} onLoad={handleMapLoad} />
       </DeckGL>
 
       {hoverInfo && (
@@ -182,20 +225,33 @@ export function OpportunityMap({
         </div>
       )}
 
-      <div className="absolute bottom-4 left-4 z-10 flex gap-3 rounded-lg border bg-card/90 px-3 py-2 text-xs backdrop-blur">
-        <span className="flex items-center gap-1.5">
-          <span className="inline-block h-3 w-3 rounded-full bg-[rgb(30,50,255)]" />
-          Existing locations
-        </span>
-        <span className="flex items-center gap-1.5">
-          <span className="inline-block h-3 w-3 rounded-full bg-[rgb(0,200,80)]" />
-          Top opportunities
-        </span>
-        <span className="flex items-center gap-1.5">
-          <span className="inline-block h-2.5 w-6 rounded-sm" style={{ background: "linear-gradient(to right, rgb(0,0,200), rgb(0,150,0), rgb(255,0,0))" }} />
-          Similarity
-        </span>
-      </div>
+      {drawingEnabled && onDrawingModeChange && onClearDrawing && onUndoDrawing && (
+        <DrawToolbar
+          mode={drawingMode}
+          onModeChange={onDrawingModeChange}
+          pointCount={drawnFeatureCounts.points}
+          polygonCount={drawnFeatureCounts.polygons}
+          onClear={onClearDrawing}
+          onUndo={onUndoDrawing}
+        />
+      )}
+
+      {hasResults && (
+        <div className="absolute bottom-4 left-4 z-10 flex gap-3 rounded-lg border bg-card/90 px-3 py-2 text-xs backdrop-blur">
+          <span className="flex items-center gap-1.5">
+            <span className="inline-block h-3 w-3 rounded-full bg-[rgb(30,50,255)]" />
+            Existing locations
+          </span>
+          <span className="flex items-center gap-1.5">
+            <span className="inline-block h-3 w-3 rounded-full bg-[rgb(0,200,80)]" />
+            Top opportunities
+          </span>
+          <span className="flex items-center gap-1.5">
+            <span className="inline-block h-2.5 w-6 rounded-sm" style={{ background: "linear-gradient(to right, rgb(0,0,200), rgb(0,150,0), rgb(255,0,0))" }} />
+            Similarity
+          </span>
+        </div>
+      )}
     </div>
   );
 }
