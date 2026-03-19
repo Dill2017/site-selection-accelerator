@@ -75,14 +75,23 @@ export function OpportunityMap({
 
   const initialViewState = useMemo(
     () => ({
-      latitude: centerLat ?? DEFAULT_CENTER.lat,
-      longitude: centerLon ?? DEFAULT_CENTER.lon,
-      zoom: hasResults ? 11 : DEFAULT_ZOOM,
+      latitude: DEFAULT_CENTER.lat,
+      longitude: DEFAULT_CENTER.lon,
+      zoom: DEFAULT_ZOOM,
       pitch: 0,
       bearing: 0,
     }),
-    [centerLat, centerLon, hasResults],
+    [],
   );
+
+  useEffect(() => {
+    if (!mapRef.current || !centerLat || !centerLon) return;
+    mapRef.current.flyTo({
+      center: [centerLon, centerLat],
+      zoom: 11,
+      duration: 1500,
+    });
+  }, [centerLat, centerLon]);
 
   const whitespace = useMemo(
     () => hexagons.filter((h) => !h.is_brand_cell),
