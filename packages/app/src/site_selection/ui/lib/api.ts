@@ -38,14 +38,23 @@ export interface AppConfigOut {
     h3_resolutions: number[];
 }
 export interface BrandInput {
+    geojson?: Record<string, unknown> | null;
     mode: string;
-    value: string;
+    value?: string;
 }
 export interface BrandLocationData {
     count?: number;
     hex_id: string;
     lat: number;
     lon: number;
+}
+export interface BrandPOIRow {
+    brand?: string;
+    category: string;
+    h3_cell?: string;
+    lat?: number | null;
+    lon?: number | null;
+    name: string;
 }
 export interface BrandProfileOut {
     avg_profile: CategoryAvgItem[];
@@ -74,6 +83,12 @@ export interface CompetitionInfo {
     top_competitors: string;
     vibe_score: number;
 }
+export interface CompetitorPOI {
+    address?: string;
+    brand?: string;
+    category: string;
+    name: string;
+}
 export interface FingerprintRow {
     brand_average: number;
     brand_average_pct: number;
@@ -82,6 +97,11 @@ export interface FingerprintRow {
     group: string;
     this_location: number;
     this_location_pct: number;
+}
+export interface GenieDebugOut {
+    brand_pois: BrandPOIRow[];
+    competitor_pois_total?: number;
+    total_brand_pois?: number;
 }
 export interface HTTPValidationError {
     detail?: ValidationError[];
@@ -103,6 +123,7 @@ export interface HexagonData {
 export interface HexagonDetailOut {
     address: string;
     competition?: CompetitionInfo | null;
+    competitor_pois?: CompetitorPOI[];
     explanation_summary?: string;
     fingerprint: FingerprintRow[];
     h3_cell: number;
@@ -436,6 +457,64 @@ export function useGetBrandProfileSuspense<TData = {
     return useSuspenseQuery({
         queryKey: getBrandProfileKey(options.params),
         queryFn: ()=>getBrandProfile(options.params),
+        ...options?.query
+    });
+}
+export interface GetGenieDebugParams {
+    session_id: string;
+}
+export const getGenieDebug = async (params: GetGenieDebugParams, options?: RequestInit): Promise<{
+    data: GenieDebugOut;
+}> =>{
+    const res = await fetch(`/api/results/${params.session_id}/debug`, {
+        ...options,
+        method: "GET"
+    });
+    if (!res.ok) {
+        const body = await res.text();
+        let parsed: unknown;
+        try {
+            parsed = JSON.parse(body);
+        } catch  {
+            parsed = body;
+        }
+        throw new ApiError(res.status, res.statusText, parsed);
+    }
+    return {
+        data: await res.json()
+    };
+};
+export const getGenieDebugKey = (params?: GetGenieDebugParams)=>{
+    return [
+        "/api/results/{session_id}/debug",
+        params
+    ] as const;
+};
+export function useGetGenieDebug<TData = {
+    data: GenieDebugOut;
+}>(options: {
+    params: GetGenieDebugParams;
+    query?: Omit<UseQueryOptions<{
+        data: GenieDebugOut;
+    }, ApiError, TData>, "queryKey" | "queryFn">;
+}) {
+    return useQuery({
+        queryKey: getGenieDebugKey(options.params),
+        queryFn: ()=>getGenieDebug(options.params),
+        ...options?.query
+    });
+}
+export function useGetGenieDebugSuspense<TData = {
+    data: GenieDebugOut;
+}>(options: {
+    params: GetGenieDebugParams;
+    query?: Omit<UseSuspenseQueryOptions<{
+        data: GenieDebugOut;
+    }, ApiError, TData>, "queryKey" | "queryFn">;
+}) {
+    return useSuspenseQuery({
+        queryKey: getGenieDebugKey(options.params),
+        queryFn: ()=>getGenieDebug(options.params),
         ...options?.query
     });
 }

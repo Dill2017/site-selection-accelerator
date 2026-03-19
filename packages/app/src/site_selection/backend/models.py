@@ -29,8 +29,9 @@ class AppConfigOut(BaseModel):
 # -- Analyze Request / Response -----------------------------------------------
 
 class BrandInput(BaseModel):
-    mode: str = Field(description="'brand_name', 'latlng', or 'addresses'")
-    value: str = Field(description="Brand query, lat/lon lines, or address lines")
+    mode: str = Field(description="'brand_name', 'latlng', 'addresses', or 'map_selection'")
+    value: str = Field(default="", description="Brand query, lat/lon lines, or address lines")
+    geojson: dict | None = Field(default=None, description="GeoJSON FeatureCollection for map_selection mode")
 
 
 class AnalyzeRequest(BaseModel):
@@ -117,6 +118,13 @@ class CompetitionInfo(BaseModel):
     top_competitors: str
 
 
+class CompetitorPOI(BaseModel):
+    name: str
+    category: str
+    brand: str = ""
+    address: str = ""
+
+
 class HexagonDetailOut(BaseModel):
     h3_cell: int
     hex_id: str
@@ -126,4 +134,22 @@ class HexagonDetailOut(BaseModel):
     poi_count: int = 0
     explanation_summary: str = ""
     competition: CompetitionInfo | None = None
+    competitor_pois: list[CompetitorPOI] = []
     fingerprint: list[FingerprintRow]
+
+
+# -- Genie Debug ---------------------------------------------------------------
+
+class BrandPOIRow(BaseModel):
+    name: str
+    category: str
+    brand: str = ""
+    lat: float | None = None
+    lon: float | None = None
+    h3_cell: str = ""
+
+
+class GenieDebugOut(BaseModel):
+    brand_pois: list[BrandPOIRow]
+    total_brand_pois: int = 0
+    competitor_pois_total: int = 0

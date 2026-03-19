@@ -5,7 +5,8 @@ import { ConfigSidebar } from "@/components/sidebar/config-sidebar";
 import { BrandProfileDialog } from "@/components/brand-profile/brand-profile-dialog";
 import { FingerprintPanel } from "@/components/fingerprint/fingerprint-panel";
 import { useAnalyze } from "@/lib/use-analyze";
-import type { HexagonData } from "@/lib/types";
+import { useMapDraw } from "@/lib/use-map-draw";
+import type { HexagonData, DrawingMode } from "@/lib/types";
 import { MapPin } from "lucide-react";
 
 export const Route = createFileRoute("/")({
@@ -17,48 +18,71 @@ function Index() {
   const [showBrandProfile, setShowBrandProfile] = useState(false);
   const [selectedHex, setSelectedHex] = useState<HexagonData | null>(null);
 
+  const [brandMode, setBrandMode] = useState<string>("brand_name");
+  const [drawingMode, setDrawingMode] = useState<DrawingMode>("point");
+  const [mapInstance, setMapInstance] = useState<maplibregl.Map | null>(null);
+
+  const drawingEnabled = brandMode === "map_selection";
+  const { features, counts, clear, undo } = useMapDraw(
+    mapInstance,
+    drawingMode,
+    drawingEnabled,
+  );
+
   const handleHexClick = useCallback((hex: HexagonData) => {
     setSelectedHex(hex);
   }, []);
 
+  const handleMapReady = useCallback((map: maplibregl.Map) => {
+    setMapInstance(map);
+  }, []);
+
   const sessionId = analyzer.result?.session_id ?? null;
+  const hasResults = !!analyzer.result;
 
   return (
     <div className="relative h-screen w-screen overflow-hidden">
-      {/* Map fills the entire viewport */}
-      {analyzer.result ? (
-        <OpportunityMap
-          hexagons={analyzer.result.hexagons}
-          brandLocations={analyzer.result.brand_locations}
-          cityPolygonGeoJson={analyzer.result.city_polygon_geojson}
-          centerLat={analyzer.result.center_lat}
-          centerLon={analyzer.result.center_lon}
-          hasCompetition={analyzer.result.has_competition}
-          onHexClick={handleHexClick}
-        />
-      ) : (
+      <OpportunityMap
+        hexagons={analyzer.result?.hexagons}
+        brandLocations={analyzer.result?.brand_locations}
+        cityPolygonGeoJson={analyzer.result?.city_polygon_geojson}
+        centerLat={analyzer.result?.center_lat}
+        centerLon={analyzer.result?.center_lon}
+        hasCompetition={analyzer.result?.has_competition}
+        onHexClick={handleHexClick}
+        onMapReady={handleMapReady}
+        drawingEnabled={drawingEnabled}
+        drawingMode={drawingMode}
+        onDrawingModeChange={setDrawingMode}
+        drawnFeatureCounts={counts}
+        onClearDrawing={clear}
+        onUndoDrawing={undo}
+      />
+
+      {!hasResults && !drawingEnabled && (
         <EmptyState isRunning={analyzer.isRunning} />
       )}
 
-      {/* Sidebar overlay */}
       <ConfigSidebar
         isRunning={analyzer.isRunning}
         progress={analyzer.progress}
         stepLabel={analyzer.stepLabel}
         error={analyzer.error}
-        hasResult={!!analyzer.result}
+        hasResult={hasResults}
         onRun={analyzer.run}
         onShowBrandProfile={() => setShowBrandProfile(true)}
+        onBrandModeChange={setBrandMode}
+        drawnFeatures={features}
+        drawnFeatureCounts={counts}
+        onClearDrawnFeatures={clear}
       />
 
-      {/* Brand Profile Dialog */}
       <BrandProfileDialog
         open={showBrandProfile}
         onOpenChange={setShowBrandProfile}
         sessionId={sessionId}
       />
 
-      {/* Fingerprint Panel (click any hex) */}
       <FingerprintPanel
         hex={selectedHex}
         sessionId={sessionId}
@@ -70,8 +94,8 @@ function Index() {
 
 function EmptyState({ isRunning }: { isRunning: boolean }) {
   return (
-    <div className="h-full w-full flex items-center justify-center bg-muted/30">
-      <div className="text-center space-y-4 max-w-md px-4">
+    <div className="absolute inset-0 z-10 flex items-center justify-center pointer-events-none">
+      <div className="text-center space-y-4 max-w-md px-4 pointer-events-auto">
         <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-full bg-primary/10">
           <MapPin className="h-8 w-8 text-primary" />
         </div>

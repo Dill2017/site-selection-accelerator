@@ -11,9 +11,12 @@ export interface AppConfig {
 }
 
 export interface BrandInput {
-  mode: "brand_name" | "latlng" | "addresses";
+  mode: "brand_name" | "latlng" | "addresses" | "map_selection";
   value: string;
+  geojson?: GeoJSON.FeatureCollection | null;
 }
+
+export type DrawingMode = "navigate" | "point" | "polygon";
 
 export interface AnalyzeRequest {
   country: string;
@@ -113,6 +116,13 @@ export interface CompetitionInfo {
   top_competitors: string;
 }
 
+export interface CompetitorPOI {
+  name: string;
+  category: string;
+  brand: string;
+  address: string;
+}
+
 export interface HexagonDetail {
   h3_cell: number;
   hex_id: string;
@@ -122,7 +132,23 @@ export interface HexagonDetail {
   poi_count: number;
   explanation_summary: string;
   competition: CompetitionInfo | null;
+  competitor_pois: CompetitorPOI[];
   fingerprint: FingerprintRow[];
+}
+
+export interface BrandPOIRow {
+  name: string;
+  category: string;
+  brand: string;
+  lat: number | null;
+  lon: number | null;
+  h3_cell: string;
+}
+
+export interface GenieDebug {
+  brand_pois: BrandPOIRow[];
+  total_brand_pois: number;
+  competitor_pois_total: number;
 }
 
 export const STEP_LABELS: Record<string, string> = {

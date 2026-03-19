@@ -15,12 +15,15 @@ from .models import (
     AnalyzeResultOut,
     AppConfigOut,
     BrandLocationData,
+    BrandPOIRow,
     BrandProfileOut,
     CategoryAvgItem,
     CategoryGroup,
     CellBreakdownRow,
     CompetitionInfo,
+    CompetitorPOI,
     FingerprintRow,
+    GenieDebugOut,
     HexagonData,
     HexagonDetailOut,
     VersionOut,
@@ -153,6 +156,18 @@ async def analyze(req: AnalyzeRequest) -> StreamingResponse:
                 if not brand_locations:
                     yield _sse({"type": "error", "message": f"No locations found for '{req.brand_input.value}'"})
                     return
+            elif req.brand_input.mode == "map_selection":
+                if not req.brand_input.geojson:
+                    yield _sse({"type": "error", "message": "No map features provided"})
+                    return
+                brand_locations = _parse_map_selection(req.brand_input.geojson, req.resolution)
+                if not brand_locations:
+                    yield _sse({"type": "error", "message": "No valid locations from map selection"})
+                    return
+                if req.enable_competition and req.beta > 0:
+                    brand_pois_df = infer_location_categories(
+                        brand_locations, req.resolution, req.country, req.city,
+                    )
             else:
                 brand_locations = _parse_locations(req.brand_input.value, req.brand_input.mode)
                 if not brand_locations:
@@ -271,6 +286,7 @@ async def analyze(req: AnalyzeRequest) -> StreamingResponse:
                     scored, brand_pois=brand_pois_df,
                     brand_query=req.brand_input.value if req.brand_input.mode == "brand_name" else "",
                     min_similarity=0.5, country=req.country, city=req.city,
+                    resolution=req.resolution,
                 )
                 if competitor_pois is not None and not competitor_pois.empty:
                     scored = compute_opportunity_score(scored, competition, beta=req.beta)
@@ -293,6 +309,7 @@ async def analyze(req: AnalyzeRequest) -> StreamingResponse:
                 city_h3_cells_df=city_h3_cells_df,
                 competitor_pois=competitor_pois,
                 city_polygon_wkt=city_polygon_wkt,
+                brand_pois=brand_pois_df,
             )
             session_id = cache.save(pr)
 
@@ -458,6 +475,17 @@ async def get_hexagon_detail(session_id: str, hex_id: str):
     hex_id = _h3_int_to_hex(h3_cell)
     address = pr.address_lookup.get(h3_cell, "")
 
+    cell_competitor_pois: list[CompetitorPOI] = []
+    if pr.competitor_pois is not None and not pr.competitor_pois.empty:
+        cell_comps = pr.competitor_pois[pr.competitor_pois["h3_hex"] == hex_id]
+        for _, cr in cell_comps.iterrows():
+            cell_competitor_pois.append(CompetitorPOI(
+                name=str(cr.get("poi_primary_name", "")),
+                category=str(cr.get("basic_category", cr.get("poi_primary_category", ""))),
+                brand=str(cr.get("brand_name_primary", "") or ""),
+                address=str(cr.get("address_line", "") or ""),
+            ))
+
     row_match = pr.scored[pr.scored["h3_cell"] == h3_cell]
     similarity = float(row_match.iloc[0]["similarity"]) if not row_match.empty else 0.0
     opp_score = None
@@ -478,7 +506,41 @@ async def get_hexagon_detail(session_id: str, hex_id: str):
         poi_count=poi_count,
         explanation_summary=summary,
         competition=comp_info,
+        competitor_pois=cell_competitor_pois,
         fingerprint=fp_rows,
+    )
+
+
+# -- Genie Debug (brand POIs + competitor summary) ----------------------------
+
+@router.get(
+    "/results/{session_id}/debug",
+    response_model=GenieDebugOut,
+    operation_id="getGenieDebug",
+)
+async def get_genie_debug(session_id: str):
+    pr = _get_result(session_id)
+
+    brand_rows: list[BrandPOIRow] = []
+    if pr.brand_pois is not None and not pr.brand_pois.empty:
+        for _, row in pr.brand_pois.iterrows():
+            brand_rows.append(BrandPOIRow(
+                name=str(row.get("poi_primary_name", "")),
+                category=str(row.get("basic_category", row.get("poi_primary_category", ""))),
+                brand=str(row.get("brand_name_primary", "") or ""),
+                lat=float(row["lat"]) if pd.notna(row.get("lat")) else None,
+                lon=float(row["lon"]) if pd.notna(row.get("lon")) else None,
+                h3_cell=str(row.get("h3_cell", "")),
+            ))
+
+    competitor_total = 0
+    if pr.competitor_pois is not None and not pr.competitor_pois.empty:
+        competitor_total = len(pr.competitor_pois)
+
+    return GenieDebugOut(
+        brand_pois=brand_rows,
+        total_brand_pois=len(brand_rows),
+        competitor_pois_total=competitor_total,
     )
 
 
@@ -486,6 +548,44 @@ async def get_hexagon_detail(session_id: str, hex_id: str):
 
 def _sse(data: dict) -> str:
     return f"data: {json.dumps(data, default=str)}\n\n"
+
+
+def _parse_map_selection(geojson: dict, resolution: int) -> list[dict]:
+    """Extract brand locations from drawn GeoJSON features.
+
+    Points are used directly. Polygons are H3-polyfilled and converted
+    to cell centroids so they integrate with the existing pipeline.
+    """
+    seen_cells: set[str] = set()
+    locs: list[dict] = []
+
+    for feature in geojson.get("features", []):
+        geom = feature.get("geometry", {})
+        geom_type = geom.get("type")
+        coords = geom.get("coordinates")
+        if not coords:
+            continue
+
+        if geom_type == "Point":
+            lon, lat = coords[0], coords[1]
+            hex_id = h3.latlng_to_cell(lat, lon, resolution)
+            if hex_id not in seen_cells:
+                seen_cells.add(hex_id)
+                locs.append({"lat": lat, "lon": lon})
+
+        elif geom_type == "Polygon":
+            outer_ring = coords[0]
+            h3_outer = [(pt[1], pt[0]) for pt in outer_ring]
+            holes = [[(pt[1], pt[0]) for pt in ring] for ring in coords[1:]]
+            poly = h3.LatLngPoly(h3_outer, *holes)
+            cells = h3.polygon_to_cells(poly, resolution)
+            for cell in cells:
+                if cell not in seen_cells:
+                    seen_cells.add(cell)
+                    lat, lon = h3.cell_to_latlng(cell)
+                    locs.append({"lat": lat, "lon": lon})
+
+    return locs
 
 
 def _parse_locations(text: str, mode: str) -> list[dict]:

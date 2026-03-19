@@ -23,9 +23,13 @@ import {
   Search,
   Loader2,
   MapPin,
+  Crosshair,
+  Trash2,
 } from "lucide-react";
 import type { AppConfig, AnalyzeRequest, CategoryGroup } from "@/lib/types";
 import { STEP_LABELS } from "@/lib/types";
+
+type BrandMode = "brand_name" | "latlng" | "addresses" | "map_selection";
 
 interface ConfigSidebarProps {
   isRunning: boolean;
@@ -35,6 +39,10 @@ interface ConfigSidebarProps {
   hasResult: boolean;
   onRun: (req: AnalyzeRequest) => void;
   onShowBrandProfile: () => void;
+  onBrandModeChange?: (mode: BrandMode) => void;
+  drawnFeatures?: GeoJSON.FeatureCollection | null;
+  drawnFeatureCounts?: { points: number; polygons: number };
+  onClearDrawnFeatures?: () => void;
 }
 
 export function ConfigSidebar({
@@ -45,6 +53,10 @@ export function ConfigSidebar({
   hasResult,
   onRun,
   onShowBrandProfile,
+  onBrandModeChange,
+  drawnFeatures,
+  drawnFeatureCounts = { points: 0, polygons: 0 },
+  onClearDrawnFeatures,
 }: ConfigSidebarProps) {
   const [collapsed, setCollapsed] = useState(false);
   const [config, setConfig] = useState<AppConfig | null>(null);
@@ -55,13 +67,24 @@ export function ConfigSidebar({
   const [country, setCountry] = useState("");
   const [city, setCity] = useState("");
   const [selectedCats, setSelectedCats] = useState<Set<string>>(new Set());
-  const [brandMode, setBrandMode] = useState<"brand_name" | "latlng" | "addresses">("brand_name");
+  const [brandMode, setBrandMode] = useState<BrandMode>("brand_name");
   const [brandValue, setBrandValue] = useState("");
   const [enableCompetition, setEnableCompetition] = useState(true);
   const [beta, setBeta] = useState(1.0);
   const [includeBuildings, setIncludeBuildings] = useState(true);
 
   const [loadError, setLoadError] = useState<string | null>(null);
+
+  const handleBrandModeChange = useCallback(
+    (mode: BrandMode) => {
+      setBrandMode(mode);
+      onBrandModeChange?.(mode);
+      if (mode !== "map_selection") {
+        onClearDrawnFeatures?.();
+      }
+    },
+    [onBrandModeChange, onClearDrawnFeatures],
+  );
 
   useEffect(() => {
     fetch("/api/config")
@@ -128,19 +151,33 @@ export function ConfigSidebar({
     [],
   );
 
+  const isMapMode = brandMode === "map_selection";
+  const mapFeatureTotal = drawnFeatureCounts.points + drawnFeatureCounts.polygons;
+
+  const canRun =
+    !!country &&
+    !!city &&
+    selectedCats.size > 0 &&
+    (isMapMode ? mapFeatureTotal > 0 : !!brandValue.trim());
+
   const handleRun = useCallback(() => {
-    if (!country || !city || selectedCats.size === 0 || !brandValue.trim()) return;
+    if (!canRun) return;
+
+    const brandInput = isMapMode
+      ? { mode: "map_selection" as const, value: "", geojson: drawnFeatures }
+      : { mode: brandMode, value: brandValue };
+
     onRun({
       country,
       city,
       resolution,
       categories: Array.from(selectedCats),
-      brand_input: { mode: brandMode, value: brandValue },
+      brand_input: brandInput,
       enable_competition: enableCompetition,
       beta,
       include_buildings: includeBuildings,
     });
-  }, [country, city, resolution, selectedCats, brandMode, brandValue, enableCompetition, beta, includeBuildings, onRun]);
+  }, [canRun, isMapMode, drawnFeatures, brandMode, brandValue, country, city, resolution, selectedCats, enableCompetition, beta, includeBuildings, onRun]);
 
   if (collapsed) {
     return (
@@ -242,7 +279,7 @@ export function ConfigSidebar({
           {/* Brand Input */}
           <div className="space-y-2">
             <Label className="text-xs font-medium text-muted-foreground">Your Brand</Label>
-            <Select value={brandMode} onValueChange={(v) => setBrandMode(v as typeof brandMode)}>
+            <Select value={brandMode} onValueChange={(v) => handleBrandModeChange(v as BrandMode)}>
               <SelectTrigger className="h-8">
                 <SelectValue />
               </SelectTrigger>
@@ -250,9 +287,16 @@ export function ConfigSidebar({
                 <SelectItem value="brand_name">Brand Name</SelectItem>
                 <SelectItem value="latlng">Latitude / Longitude</SelectItem>
                 <SelectItem value="addresses">Addresses</SelectItem>
+                <SelectItem value="map_selection">Select on Map</SelectItem>
               </SelectContent>
             </Select>
-            {brandMode === "brand_name" ? (
+            {isMapMode ? (
+              <MapSelectionSummary
+                pointCount={drawnFeatureCounts.points}
+                polygonCount={drawnFeatureCounts.polygons}
+                onClear={onClearDrawnFeatures}
+              />
+            ) : brandMode === "brand_name" ? (
               <Input
                 value={brandValue}
                 onChange={(e) => setBrandValue(e.target.value)}
@@ -330,7 +374,7 @@ export function ConfigSidebar({
         )}
         <Button
           onClick={handleRun}
-          disabled={isRunning || !country || !city || !brandValue.trim()}
+          disabled={isRunning || !canRun}
           className="w-full"
           size="sm"
         >
@@ -357,6 +401,52 @@ export function ConfigSidebar({
           </Button>
         )}
       </div>
+    </div>
+  );
+}
+
+function MapSelectionSummary({
+  pointCount,
+  polygonCount,
+  onClear,
+}: {
+  pointCount: number;
+  polygonCount: number;
+  onClear?: () => void;
+}) {
+  const total = pointCount + polygonCount;
+
+  if (total === 0) {
+    return (
+      <div className="rounded-md border border-dashed p-3 text-center">
+        <Crosshair className="mx-auto h-5 w-5 text-muted-foreground mb-1.5" />
+        <p className="text-xs text-muted-foreground">
+          Use the toolbar on the map to place points or draw polygons
+        </p>
+      </div>
+    );
+  }
+
+  const parts: string[] = [];
+  if (pointCount > 0) parts.push(`${pointCount} ${pointCount === 1 ? "point" : "points"}`);
+  if (polygonCount > 0) parts.push(`${polygonCount} ${polygonCount === 1 ? "polygon" : "polygons"}`);
+
+  return (
+    <div className="rounded-md border bg-muted/50 px-3 py-2 flex items-center justify-between">
+      <div className="flex items-center gap-2">
+        <Crosshair className="h-4 w-4 text-primary" />
+        <span className="text-xs font-medium">{parts.join(", ")}</span>
+      </div>
+      {onClear && (
+        <Button
+          variant="ghost"
+          size="sm"
+          className="h-6 w-6 p-0 text-muted-foreground hover:text-destructive"
+          onClick={onClear}
+        >
+          <Trash2 className="h-3.5 w-3.5" />
+        </Button>
+      )}
     </div>
   );
 }
