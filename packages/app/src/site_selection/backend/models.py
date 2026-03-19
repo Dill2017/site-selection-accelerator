@@ -153,3 +153,30 @@ class GenieDebugOut(BaseModel):
     brand_pois: list[BrandPOIRow]
     total_brand_pois: int = 0
     competitor_pois_total: int = 0
+
+
+# -- Persist / Assets ---------------------------------------------------------
+
+class PersistResultOut(BaseModel):
+    analysis_id: str
+    tables_written: list[str]
+
+
+class AnalysisSummary(BaseModel):
+    analysis_id: str
+    brand_input_value: str = ""
+    city: str = ""
+    country: str = ""
+    created_at: str = ""
+
+
+class AssetLink(BaseModel):
+    name: str
+    url: str
+    asset_type: str = Field(description="table | job | genie | volume | workspace")
+
+
+class AssetsOut(BaseModel):
+    workspace_url: str = ""
+    links: list[AssetLink] = []
+    recent_analyses: list[AnalysisSummary] = []

@@ -151,6 +151,33 @@ export interface GenieDebug {
   competitor_pois_total: number;
 }
 
+// -- Persist / Assets -------------------------------------------------------
+
+export interface PersistResult {
+  analysis_id: string;
+  tables_written: string[];
+}
+
+export interface AnalysisSummary {
+  analysis_id: string;
+  brand_input_value: string;
+  city: string;
+  country: string;
+  created_at: string;
+}
+
+export interface AssetLink {
+  name: string;
+  url: string;
+  asset_type: "table" | "job" | "genie" | "volume" | "workspace";
+}
+
+export interface AssetsData {
+  workspace_url: string;
+  links: AssetLink[];
+  recent_analyses: AnalysisSummary[];
+}
+
 export const STEP_LABELS: Record<string, string> = {
   starting: "Starting pipeline...",
   loading_model: "Loading Hex2Vec model...",

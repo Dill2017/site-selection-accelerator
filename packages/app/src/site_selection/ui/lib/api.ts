@@ -12,6 +12,13 @@ export class ApiError extends Error {
         this.body = body;
     }
 }
+export interface AnalysisSummary {
+    analysis_id: string;
+    brand_input_value?: string;
+    city?: string;
+    country?: string;
+    created_at?: string;
+}
 export interface AnalyzeRequest {
     beta?: number;
     brand_input: BrandInput;
@@ -36,6 +43,16 @@ export interface AppConfigOut {
     category_groups: CategoryGroup[];
     default_resolution: number;
     h3_resolutions: number[];
+}
+export interface AssetLink {
+    asset_type: string;
+    name: string;
+    url: string;
+}
+export interface AssetsOut {
+    links?: AssetLink[];
+    recent_analyses?: AnalysisSummary[];
+    workspace_url?: string;
 }
 export interface BrandInput {
     geojson?: Record<string, unknown> | null;
@@ -132,6 +149,10 @@ export interface HexagonDetailOut {
     poi_count?: number;
     similarity: number;
 }
+export interface PersistResultOut {
+    analysis_id: string;
+    tables_written: string[];
+}
 export interface ValidationError {
     ctx?: Record<string, unknown>;
     input?: unknown;
@@ -176,6 +197,58 @@ export function useAnalyze(options?: {
     return useMutation({
         mutationFn: (data)=>analyze(data),
         ...options?.mutation
+    });
+}
+export const getAssets = async (options?: RequestInit): Promise<{
+    data: AssetsOut;
+}> =>{
+    const res = await fetch("/api/assets", {
+        ...options,
+        method: "GET"
+    });
+    if (!res.ok) {
+        const body = await res.text();
+        let parsed: unknown;
+        try {
+            parsed = JSON.parse(body);
+        } catch  {
+            parsed = body;
+        }
+        throw new ApiError(res.status, res.statusText, parsed);
+    }
+    return {
+        data: await res.json()
+    };
+};
+export const getAssetsKey = ()=>{
+    return [
+        "/api/assets"
+    ] as const;
+};
+export function useGetAssets<TData = {
+    data: AssetsOut;
+}>(options?: {
+    query?: Omit<UseQueryOptions<{
+        data: AssetsOut;
+    }, ApiError, TData>, "queryKey" | "queryFn">;
+}) {
+    return useQuery({
+        queryKey: getAssetsKey(),
+        queryFn: ()=>getAssets(),
+        ...options?.query
+    });
+}
+export function useGetAssetsSuspense<TData = {
+    data: AssetsOut;
+}>(options?: {
+    query?: Omit<UseSuspenseQueryOptions<{
+        data: AssetsOut;
+    }, ApiError, TData>, "queryKey" | "queryFn">;
+}) {
+    return useSuspenseQuery({
+        queryKey: getAssetsKey(),
+        queryFn: ()=>getAssets(),
+        ...options?.query
     });
 }
 export interface ListCitiesParams {
@@ -575,6 +648,84 @@ export function useGetHexagonDetailSuspense<TData = {
         queryKey: getHexagonDetailKey(options.params),
         queryFn: ()=>getHexagonDetail(options.params),
         ...options?.query
+    });
+}
+export interface PersistAnalysisParams {
+    session_id: string;
+}
+export const persistAnalysis = async (params: PersistAnalysisParams, options?: RequestInit): Promise<{
+    data: PersistResultOut;
+}> =>{
+    const res = await fetch(`/api/results/${params.session_id}/persist`, {
+        ...options,
+        method: "POST"
+    });
+    if (!res.ok) {
+        const body = await res.text();
+        let parsed: unknown;
+        try {
+            parsed = JSON.parse(body);
+        } catch  {
+            parsed = body;
+        }
+        throw new ApiError(res.status, res.statusText, parsed);
+    }
+    return {
+        data: await res.json()
+    };
+};
+export function usePersistAnalysis(options?: {
+    mutation?: UseMutationOptions<{
+        data: PersistResultOut;
+    }, ApiError, {
+        params: PersistAnalysisParams;
+    }>;
+}) {
+    return useMutation({
+        mutationFn: (vars)=>persistAnalysis(vars.params),
+        ...options?.mutation
+    });
+}
+export interface PersistAnalysisWithContextParams {
+    session_id: string;
+}
+export const persistAnalysisWithContext = async (params: PersistAnalysisWithContextParams, data: AnalyzeRequest, options?: RequestInit): Promise<{
+    data: PersistResultOut;
+}> =>{
+    const res = await fetch(`/api/results/${params.session_id}/persist-with-context`, {
+        ...options,
+        method: "POST",
+        headers: {
+            "Content-Type": "application/json",
+            ...options?.headers
+        },
+        body: JSON.stringify(data)
+    });
+    if (!res.ok) {
+        const body = await res.text();
+        let parsed: unknown;
+        try {
+            parsed = JSON.parse(body);
+        } catch  {
+            parsed = body;
+        }
+        throw new ApiError(res.status, res.statusText, parsed);
+    }
+    return {
+        data: await res.json()
+    };
+};
+export function usePersistAnalysisWithContext(options?: {
+    mutation?: UseMutationOptions<{
+        data: PersistResultOut;
+    }, ApiError, {
+        params: PersistAnalysisWithContextParams;
+        data: AnalyzeRequest;
+    }>;
+}) {
+    return useMutation({
+        mutationFn: (vars)=>persistAnalysisWithContext(vars.params, vars.data),
+        ...options?.mutation
     });
 }
 export const version = async (options?: RequestInit): Promise<{

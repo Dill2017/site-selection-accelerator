@@ -1,106 +1,36 @@
-# Site Selection Accelerator — Brand Site Matching
+# Site Selection Accelerator
 
-A Databricks solution accelerator that helps retail operations teams identify
-**whitespace expansion opportunities** for their brand. Users can search by
-**brand name** (e.g. "Starbucks", "Premier Inn") or enter coordinates directly.
-The app discovers existing locations via **Databricks Genie** (natural language
-to SQL), builds a geospatial profile using **Hex2Vec** embeddings from both
-**POI categories** and **building data** (type, height), scores every H3
-hexagonal cell in the target city by neighbourhood similarity, and applies a
-**competition penalty** based on co-located competitors — surfacing the areas
-that best match the brand's surroundings but aren't yet saturated.
+A Databricks solution accelerator that helps retail and operations teams
+identify **whitespace expansion opportunities** for their brand. The app
+discovers existing locations, builds a geospatial profile using **Hex2Vec**
+embeddings from POI and building data, scores every H3 hexagonal cell in a
+target city by neighbourhood similarity, and applies a competition penalty to
+surface areas that best match the brand but are not yet saturated.
 
-Brand locations can be in **any city** — the tool learns what kind of
-neighbourhoods a brand thrives in and finds similar areas in the target market,
-enabling cross-city expansion analysis.
+Everything the app produces is persisted so the end user walks away with a
+complete set of assets: the **ETL pipeline**, the **pretrained model**, the
+**gold tables**, the **analysis results in Delta**, and a **Genie Space** for
+continued natural-language exploration.
 
 **Use cases:** franchise expansion, competitive gap analysis, new market entry.
 
-> **Detailed technical notes:** see
-> [INTEGRATION_PLAN.md](INTEGRATION_PLAN.md) for architecture diagrams,
-> scoring formula, category filtering details, and file change summary.
-
 ---
 
-## Architecture
+## What You Get
 
-```
-┌───────────────────────────────────────────────────────────────────────┐
-│                       Databricks App (apx)                           │
-│                                                                      │
-│  ┌─────────────────────────────────────────────────────────────────┐  │
-│  │              React + TypeScript Frontend (Vite)                 │  │
-│  │                                                                 │  │
-│  │  ┌────────────────┐ ┌──────────────┐ ┌───────────────────────┐ │  │
-│  │  │ deck.gl Map    │ │ Config       │ │ Brand Profile Dialog  │ │  │
-│  │  │ (H3 heatmap,   │ │ Sidebar      │ │ (avg bar chart +     │ │  │
-│  │  │  brand dots,   │ │ (country,    │ │  per-location table)  │ │  │
-│  │  │  top opps,     │ │  city, POIs, │ │                       │ │  │
-│  │  │  city boundary)│ │  brand, β)   │ ├───────────────────────┤ │  │
-│  │  │                │ │              │ │ Fingerprint Panel     │ │  │
-│  │  │  Click any hex │ │  SSE progress│ │ (click any hexagon:   │ │  │
-│  │  │  → detail panel│ │  streaming   │ │  bar/line chart vs    │ │  │
-│  │  └────────────────┘ └──────────────┘ │  brand avg, scores,   │ │  │
-│  │                                      │  competition detail)  │ │  │
-│  │                                      └───────────────────────┘ │  │
-│  └─────────────────────────────────────────────────────────────────┘  │
-│                              │ /api/*                                 │
-│  ┌─────────────────────────────────────────────────────────────────┐  │
-│  │              FastAPI Backend (Python)                            │  │
-│  │                                                                 │  │
-│  │  GET /api/config         — H3 resolutions, POI category groups  │  │
-│  │  GET /api/countries      — available countries from gold_cities  │  │
-│  │  GET /api/cities         — cities for selected country           │  │
-│  │  POST /api/analyze       — SSE pipeline (tessellate, embed,     │  │
-│  │                            score, cache results)                 │  │
-│  │  GET /api/results/{id}   — cached analysis for map rendering    │  │
-│  │  GET /api/results/{id}/brand-profile — brand avg + breakdown    │  │
-│  │  GET /api/results/{id}/hexagon/{hex} — on-demand fingerprint    │  │
-│  └─────────────────────────────────────────────────────────────────┘  │
-│                              │                                       │
-│  ┌─────────────────────────────────────────────────────────────────┐  │
-│  │              Legacy Python Modules (bundled in wheel)            │  │
-│  │                                                                 │  │
-│  │  config.py       — gold table refs, categories, Genie Space ID  │  │
-│  │  pipeline.py     — DBSQL queries on gold tables                 │  │
-│  │  embeddings.py   — SRAI Hex2Vec embedding pipeline              │  │
-│  │  similarity.py   — cosine similarity + opportunity scoring      │  │
-│  │  brand_search.py — Genie brand discovery + competition          │  │
-│  │  explainability.py — score explanations + LLM fingerprint       │  │
-│  └─────────────────────────────────────────────────────────────────┘  │
-└───────────────────────────────────────────────────────────────────────┘
-                              │
-     ┌────────────────────────┼────────────────────────┐
-     ▼                        ▼                         ▼
-┌──────────────────┐ ┌──────────────────┐ ┌──────────────────────┐
-│  Gold Tables      │ │  Genie Space     │ │  Databricks SQL      │
-│  (Unity Catalog)  │ │  (auto-created)  │ │  Warehouse           │
-│                   │ │                  │ │                      │
-│  • gold_cities    │ │  NL → SQL on:    │ │  H3 functions:       │
-│  • gold_places    │ │  • gold_places   │ │   h3_polyfillash3    │
-│  • gold_places    │ │    _enriched     │ │   h3_longlatash3     │
-│    _enriched      │ │  • gold_cities   │ │   h3_h3tostring      │
-│  • gold_buildings │ │                  │ │   h3_centerasgeojson │
-│  • app_config     │ │                  │ │  ai_query():         │
-└──────────────────┘ └──────────────────┘ │   Llama 3.3 70B      │
-                                          │   (fingerprint)      │
-                                          │   Claude Opus 4.6    │
-                                          │   (competition)      │
-                                          └──────────────────────┘
-         ▲
-┌───────────────────────┐
-│  ETL Job               │
-│  (SQL + Python tasks)  │
-│                        │
-│  CARTO Overture Maps   │
-│  → gold_cities         │
-│  → gold_places         │
-│  → gold_buildings      │
-│  → gold_places_enriched│
-│  → Genie Space setup   │
-│  → Hex2Vec pre-training│
-└───────────────────────┘
-```
+| Asset | Description |
+|---|---|
+| **Databricks App** | Interactive full-stack app (React + FastAPI) for running brand site analysis |
+| **ETL Pipeline** | DABs job that builds gold tables from CARTO Overture Maps and trains the Hex2Vec model |
+| **Gold Tables** | `gold_cities`, `gold_places`, `gold_buildings`, `gold_places_enriched` in Unity Catalog |
+| **Analysis Tables** | `analyses`, `analysis_hexagons`, `analysis_brand_profiles`, `analysis_fingerprints`, `analysis_competitors` — every analysis run persisted to Delta |
+| **Hex2Vec Model** | Multi-city pretrained geospatial embedding model stored in a UC Volume |
+| **Genie Space** | Natural-language SQL exploration over both the base data and your analysis results |
+
+After running an analysis and clicking **Save Analysis**, all results are
+written to Delta tables keyed by a unique `analysis_id`. The **Assets** button
+in the app links directly to the workspace, pipeline, tables, Genie Space, and
+model.
 
 ---
 
@@ -110,423 +40,338 @@ enabling cross-city expansion analysis.
 
 | Requirement | Details |
 |---|---|
-| Databricks workspace | With access to a SQL Warehouse |
-| Databricks CLI | v0.239.0+ (for Asset Bundle deployment) |
-| CARTO Overture Maps catalogs | `carto_overture_maps_places`, `carto_overture_maps_divisions`, `carto_overture_maps_buildings` mounted via Delta Sharing |
-| Python | 3.11+ |
-| uv | Python package manager |
-| bun | JavaScript package manager (used by apx) |
+| Databricks workspace | With a SQL Warehouse (Serverless or Pro recommended) |
+| Databricks CLI | v0.239.0+ |
+| CARTO Overture Maps | `carto_overture_maps_places`, `carto_overture_maps_divisions`, `carto_overture_maps_buildings` available via Databricks Marketplace / Delta Sharing |
+| Python 3.11+ | With [uv](https://docs.astral.sh/uv/) installed |
 
-### 1. Clone the repository
+### 1. Clone and install
 
 ```bash
-git clone <repo-url> site-selection-accelerator
+git clone https://github.com/Dill2017/site-selection-accelerator.git
 cd site-selection-accelerator
+uv sync
 ```
 
-### 2. Configure your Databricks profile
-
-Make sure you have a working Databricks CLI profile:
+### 2. Authenticate with Databricks
 
 ```bash
-databricks auth login --host https://<workspace-url>
+databricks auth login --host https://<your-workspace-url>
 ```
 
-### 3. Configure catalog, schema, and warehouse
+### 3. Configure your catalog, schema, and warehouse
 
-Edit `databricks.yml` to set your target catalog and schema (defaults shown):
+Edit **`databricks.yml`** — set your target catalog, schema, and warehouse:
 
 ```yaml
-sync:
-  include:
-    - packages/app/.build       # Force-sync gitignored build artifacts
-
 variables:
   catalog:
-    default: "dilshad_shawki"   # Change to your catalog
+    default: "my_catalog"          # <-- your Unity Catalog catalog
   schema:
-    default: "geospatial"       # Change to your schema
+    default: "site_selection"      # <-- your schema (will be created)
   warehouse_id:
     lookup:
-      warehouse: "Shared Endpoint"  # Change to your warehouse name
+      warehouse: "My SQL Warehouse"  # <-- your SQL warehouse name
 ```
 
-Also update `packages/app/app.yml` to match:
+Edit **`packages/app/app.yml`** — set the same catalog and schema as environment
+variables for the running app:
 
 ```yaml
 env:
   - name: DATABRICKS_WAREHOUSE_ID
     valueFrom: sql-warehouse
   - name: GOLD_CATALOG
-    value: "dilshad_shawki"     # Must match catalog above
+    value: "my_catalog"            # <-- must match catalog above
   - name: GOLD_SCHEMA
-    value: "geospatial"         # Must match schema above
+    value: "site_selection"        # <-- must match schema above
   - name: GENIE_SPACE_ID
-    value: ""                   # Optional — auto-created if empty
+    value: ""                      # leave empty — auto-created by ETL
 ```
 
-### 4. Deploy with Asset Bundles
+### 4. Deploy
 
 ```bash
-# Build the frontend and Python wheel
 uv run apx build
-
-# Deploy bundle resources (includes .build artifacts via sync.include)
 databricks bundle deploy
-
-# Start / restart the app
-databricks bundle run site_selection_app
 ```
 
-> **Note:** `databricks.yml` contains a `sync.include` directive that
-> force-syncs the `packages/app/.build` directory (which is gitignored).
-> This ensures `bundle deploy` always uploads the latest wheel,
-> `requirements.txt`, and `app.yml` without manual intervention.
+### 5. Run the ETL pipeline
 
-### 5. Run the ETL job to populate gold tables
-
-This creates `gold_cities`, `gold_places`, `gold_buildings`, and
-`gold_places_enriched` tables in your catalog/schema, then provisions a Genie
-Space with spatial instructions.
+This creates the schema, gold tables, analysis tables, Genie Space, and
+pretrained Hex2Vec model — everything the app needs:
 
 ```bash
 databricks bundle run geospatial_etl_job
 ```
 
-### 6. Open the application
+The job takes ~10 minutes. You can monitor it from the Jobs UI link printed in
+the terminal.
 
-After deployment, the Databricks Apps UI will show the application URL.
-Open it in your browser to start finding whitespace opportunities.
-
----
-
-## Local Development
-
-The app uses [apx](https://github.com/databricks-solutions/apx), a toolkit
-for building full-stack Databricks Apps with React + FastAPI.
+### 6. Launch the app
 
 ```bash
-# Install Python dependencies
-uv sync
-
-# Install frontend dependencies
-uv run apx bun install
-
-# Create packages/app/.env with local dev settings:
-#   DATABRICKS_CONFIG_PROFILE=DEFAULT
-#   GOLD_CATALOG=your_catalog
-#   GOLD_SCHEMA=your_schema
-#   DATABRICKS_WAREHOUSE_ID=your_warehouse_id
-
-# Start dev servers (backend + frontend + OpenAPI watcher)
-uv run apx dev start
-
-# Check status
-uv run apx dev status
-
-# View logs
-uv run apx dev logs
-
-# Run type checks
-uv run apx dev check
-
-# Stop servers
-uv run apx dev stop
+databricks bundle run site_selection_app
 ```
+
+The app URL will appear in the Databricks Apps UI. Open it in your browser.
 
 ---
 
-## How It Works
+## Required Permissions
 
-### Step 1 — Gold Table ETL (one-time setup)
+The deploying user and the app service principal need the following access:
 
-A Databricks job with SQL and Python tasks pre-processes the raw CARTO
-Overture Maps data into gold tables and provisions the Genie Space:
-
-| Gold Table | Source | What it does |
+| Resource | Permission | Why |
 |---|---|---|
-| `gold_cities` | `division` + `division_area` | Joins city metadata with polygons, extracts WKT geometry, and computes bounding boxes. Uses a multi-level fallback: locality area first, then `ST_Union` of all same-name region/county/neighborhood/macrohood areas (covers city-states like Hamburg/Berlin and metro areas like Manchester/Birmingham), finally a synthetic bbox polygon |
-| `gold_places` | `place` | Extracts lon/lat from WKB geometry, flattens `categories.primary` and `addresses[0].freeform`, filters to supported POI categories |
-| `gold_buildings` | `building` | Extracts centroids from footprint polygons, derives `building_category` (prefixed subtype/class, e.g. `bldg_residential`), `height_bin` (low/mid/high-rise/skyscraper), pre-computes H3 cell at resolution 9, Z-ordered by bbox for fast spatial scans |
-| `gold_places_enriched` | `place` | Comprehensive POI table with flattened names, categories, brands, addresses, coordinates, and bounding boxes for Genie and competition queries |
-| `app_config` | — | Key-value store for `GENIE_SPACE_ID` and other runtime config |
+| **Catalog** (e.g. `my_catalog`) | `USE CATALOG`, `CREATE SCHEMA` | ETL creates the schema and tables |
+| **Schema** (e.g. `my_catalog.site_selection`) | `USE SCHEMA`, `CREATE TABLE`, `SELECT`, `MODIFY` | Read gold tables, write analysis results |
+| **SQL Warehouse** | `CAN_USE` | All queries and `ai_query()` LLM calls |
+| **CARTO Overture Maps catalogs** | `SELECT` | ETL reads source data (`carto_overture_maps_places`, `_divisions`, `_buildings`) |
+| **UC Volume** (`/Volumes/{catalog}/{schema}/models/`) | `READ FILES`, `WRITE FILES` | Store and load the pretrained Hex2Vec model |
+| **Genie Space** | `CAN_RUN` | Auto-granted to the app service principal by the ETL |
+| **Foundation Model endpoints** | Access via SQL warehouse | `ai_query()` calls for LLM-powered fingerprint insights and competition filtering |
 
-The ETL job also runs `setup_genie_space.py`, which creates (or updates) a
-Genie Space configured with `h3_polyfillash3`-based spatial instructions and
-example SQL, then persists the space ID to `app_config`.
+The ETL job's `setup_genie_space` task automatically grants `CAN_RUN` on the
+Genie Space to the app's service principal.
 
-Additionally, the job runs `train_hex2vec.py`, which pre-trains a Hex2Vec
-model on multiple cities (following the
-[Hex2Vec paper](https://arxiv.org/abs/2111.00970) methodology) and saves
-it to a UC Volume. See [HEX2VEC_EXPLAINER.md](HEX2VEC_EXPLAINER.md) for
-details on why multi-city pre-training produces better embeddings.
+---
 
-### Step 2 — User Input
+## Using the App
 
-The collapsible sidebar collects:
+### Running an Analysis
 
-- **Brand name** (e.g. "Starbucks", "Premier Inn") — discovered via Genie.
-  The Genie Space uses `h3_polyfillash3` to fill the city polygon with H3
-  cells and filters POIs by cell membership for fast spatial queries.
-- **Or brand locations**: `lat, lon` pairs or street addresses (geocoded via
-  Nominatim/geopy). These can be in **any city** — not just the target city.
-- **H3 resolution** (7–10): controls hexagon granularity.
-- **Target country and city**: cascading dropdowns populated from `gold_cities`
-  (defaults to GB / London).
-- **POI categories**: multi-select grouped by theme (Food & Drink, Shopping,
-  Services, Entertainment, Commercial).
-- **Building features toggle**: include/exclude building type and height data
-  in the embeddings (enabled by default).
-- **Competition sensitivity (beta)**: slider from 0 to 1 controlling how
-  heavily competition penalises the opportunity score.
+1. **Select a target market** — choose country and city from the dropdowns.
+2. **Choose your brand** — enter a brand name (e.g. "Starbucks"), lat/lon
+   coordinates, street addresses, or draw locations on the map.
+3. **Tune parameters** — adjust H3 resolution, POI categories, building
+   features, and competition sensitivity.
+4. **Click "Find Opportunities"** — the pipeline runs with live progress,
+   then the map fills with scored hexagons.
+5. **Explore** — hover hexagons for quick stats, click any hexagon for a
+   detailed fingerprint with LLM-generated insight, view the brand profile.
 
-### Step 3 — Brand Discovery via Genie (`brand_search.py`)
+### Saving Results to Delta
 
-1. The app sends a natural language question to the Genie Space (e.g. "Find
-   all Starbucks within London, GB using h3_polyfillash3").
-2. Genie generates optimised SQL following the configured instructions —
-   using `h3_polyfillash3` to convert the city polygon into H3 cells,
-   then filtering POIs by H3 cell membership (no expensive ST_CONTAINS).
-3. The generated SQL is executed via DBSQL for full, reliable results.
-4. H3 cells are returned as hex strings via `h3_h3tostring`.
-5. If `GENIE_SPACE_ID` is not set, the app auto-provisions one on first use.
+Click **Save Analysis** in the sidebar after an analysis completes. This
+persists all outputs to five Delta tables, each keyed by a unique
+`analysis_id`:
 
-### Step 4 — Cross-City Brand Profiling (`pipeline.py`)
-
-When brand locations are outside the target city:
-
-1. Each external location gets an H3 neighbourhood (center cell + k-ring=2).
-2. POIs are fetched for those neighbourhoods from `gold_places`.
-3. The neighbourhood cells and POIs are merged with the target city data.
-4. Hex2Vec trains on the combined dataset, placing brand cells and target city
-   cells in the same embedding space.
-5. After scoring, only target city cells are shown as opportunities.
-
-### Step 5 — SRAI Hex2Vec Embeddings (`embeddings.py`)
-
-Using the [SRAI](https://kraina-ai.github.io/srai/) library:
-
-1. Builds a `regions_gdf` of H3 cell polygons (via the `h3` Python library).
-2. Fetches buildings from `gold_buildings` and normalises each into up to two
-   feature rows: one for building type (`bldg_residential`, `bldg_commercial`,
-   etc.) and one for height bin (`height_low_rise`, `height_mid_rise`, etc.).
-3. Merges POIs and buildings into a unified features table with generic
-   `feature_id` / `category` columns. Builds a `features_gdf` with one-hot
-   encoded category columns spanning both POI and building categories.
-4. Constructs a `joint_gdf` (region-feature mapping) directly from the DBSQL
-   H3 assignment.
-5. **Generates embeddings** — the app uses one of two paths:
-
-   | Path | When | How |
-   |---|---|---|
-   | **Pre-trained model (fast)** | A model saved to the UC Volume matches the selected H3 resolution | Calls `embedder.transform()` — inference only, no training needed |
-   | **Fit-from-scratch (fallback)** | No pre-trained model available, or resolution mismatch | Trains a fresh `Hex2VecEmbedder` via `fit_transform()` |
-
-   The pre-trained model is generated offline by the `train_hex2vec` ETL task,
-   which fits an encoder (sizes `[48, 24, 12]`, 10 epochs) on 37 cities
-   simultaneously. This multi-city training captures a richer spatial vocabulary
-   than training on a single target city, following the approach from the
-   [Hex2Vec paper](https://arxiv.org/abs/2111.00970) (see Figure 11). The
-   model and metadata are persisted to a UC Volume and downloaded at app
-   startup via the Databricks SDK Files API.
-
-   When the pre-trained model is used, the features are constructed using
-   the full set of training categories (all POI + building categories), even
-   if the user selected a subset. This ensures the feature vectors are
-   compatible with the trained encoder weights.
-
-Building data enriches the embeddings with land-use signals (residential vs.
-commercial vs. industrial) and urbanisation density (height profile) that POIs
-alone cannot capture.
-
-> **Deep dive:** See [HEX2VEC_EXPLAINER.md](HEX2VEC_EXPLAINER.md) for a
-> full explanation of how Hex2Vec works.
-
-### Step 6 — Cosine Similarity & Opportunity Scoring (`similarity.py`)
-
-1. Maps each brand location to its H3 cell at the chosen resolution.
-2. Averages those cell embeddings to form a **brand profile vector**.
-3. Computes cosine similarity between the brand profile and every target city
-   cell's embedding.
-4. Re-normalises scores to [0, 1] within the target city for colour contrast.
-5. Excludes cells where the brand already has a location.
-6. **Competition analysis** (all input modes): queries `gold_places_enriched`
-   for businesses in high-similarity cells matching the brand's categories.
-   Categories are filtered via a frequency gate and LLM industry filter.
-   For lat/lon input, categories are inferred from nearby POIs.
-7. Computes **opportunity score**:
-   `opportunity = similarity × (1 − β × competition_score)` where
-   `competition_score = competitor_count / max(competitor_count)`.
-8. Ranks cells by opportunity score, using **POI density** as a tiebreaker.
-
-### Step 7 — Interactive Map (deck.gl)
-
-The frontend renders a full-viewport interactive map using
-[deck.gl](https://deck.gl/) and [MapLibre GL](https://maplibre.org/) on a
-CARTO Positron basemap:
-
-| Layer | Description |
+| Table | Contents |
 |---|---|
-| **GeoJsonLayer** | City polygon boundary outline (when real polygon data is available) |
-| **H3HexagonLayer** | All candidate cells coloured by similarity score (red = high, blue = low) |
-| **ScatterplotLayer (blue)** | Existing brand locations snapped to H3 cell centres; colour gradient from light blue (1 location) to dark navy (max locations per cell) |
-| **ScatterplotLayer (green)** | Top 2% opportunity locations by opportunity score + POI density |
+| `analyses` | Registry of every run — brand, city, parameters, timestamp |
+| `analysis_hexagons` | Every scored H3 cell with similarity, opportunity score, POI/competitor counts |
+| `analysis_brand_profiles` | Average category distribution across brand locations |
+| `analysis_fingerprints` | Per-hexagon category comparison with LLM insight (top 20 cells) |
+| `analysis_competitors` | Competitor POIs found in high-similarity cells |
 
-Hovering over any H3 cell shows a tooltip with:
-- H3 cell ID and nearest address
-- Opportunity score and similarity percentage
-- POI count (total amenities in the cell)
-- Competitor count and top 3 competitor names (ranked by popularity)
-- Feature mix breakdown showing the most distinctive categories as normalised
-  percentages (within POI / Building types) vs the brand average
+The Genie Space includes these tables, so you can ask questions like
+*"Show me the top 10 hexagons by similarity for Starbucks in London"* in
+natural language.
 
-**Clicking any hexagon** opens a slide-in fingerprint panel (see Step 8).
+### Accessing All Assets
 
-### Step 8 — Score Explainability (`explainability.py`)
+Click the **Assets** button (bottom-right corner) to open a dialog with direct
+links to:
 
-Rather than showing only a similarity percentage, the app provides interpretable
-explanations:
+- Databricks Workspace
+- Genie Space (Brand & Competition Explorer)
+- Hex2Vec pretrained model (UC Volume)
+- All gold and analysis Delta tables
+- Recently saved analyses
 
-- **Brand Profile Dialog** — accessible via the sidebar after analysis
-  completes. Shows a bar chart of average feature distributions across all
-  brand cells, faceted by feature type (POI vs. Building) with independent
-  scales. Values are shown as **% within type** so building counts don't
-  overshadow POI counts. Also includes a per-location breakdown table.
-- **Hover tooltips** — hovering any hexagon on the map shows the top 4
-  most distinctive categories as **% within feature type** (POI / Building
-  normalised independently), sorted by largest deviation from the brand
-  average. Directional arrows (▲/▼) indicate whether each category is above
-  or below the brand profile.
-- **Hexagon Fingerprint Panel** — clicking **any hexagon** on the map opens a
-  slide-in panel with an **LLM-generated insight** (1–2 sentences) explaining
-  how this location's category mix compares to the brand average. The insight
-  is generated by **Databricks Foundation Model APIs** (Llama 3.3 70B) via
-  the `ai_query()` SQL function, routed through the SQL warehouse. Below the
-  insight, users can toggle between **line chart** and **bar chart** modes,
-  and between raw **counts** and **% within type** (normalised) views. The
-  panel also shows similarity score, opportunity score, POI count, and
-  competition details. A rule-based fallback is used if the LLM is
-  unavailable.
+---
+
+## Architecture
+
+```
+┌───────────────────────────────────────────────────────────────────────────┐
+│                        Databricks App (apx)                              │
+│                                                                          │
+│  ┌────────────────────────────────────────────────────────────────────┐   │
+│  │  React + TypeScript Frontend (deck.gl, MapLibre, shadcn/ui)       │   │
+│  │                                                                    │   │
+│  │  OpportunityMap ─ ConfigSidebar ─ BrandProfileDialog               │   │
+│  │  FingerprintPanel ─ AssetsPopover                                  │   │
+│  └────────────────────────────────────────────────────────────────────┘   │
+│                               │ /api/*                                    │
+│  ┌────────────────────────────────────────────────────────────────────┐   │
+│  │  FastAPI Backend                                                   │   │
+│  │                                                                    │   │
+│  │  POST /analyze          ─ SSE pipeline (tessellate, embed, score)  │   │
+│  │  GET  /results/{id}     ─ cached analysis for map rendering        │   │
+│  │  POST /results/{id}/persist ─ save analysis to Delta tables        │   │
+│  │  GET  /assets           ─ links to all workspace assets            │   │
+│  └────────────────────────────────────────────────────────────────────┘   │
+│                               │                                           │
+│  ┌────────────────────────────────────────────────────────────────────┐   │
+│  │  Python Modules                                                    │   │
+│  │  pipeline ─ embeddings ─ similarity ─ brand_search                 │   │
+│  │  explainability ─ persist ─ config ─ db                            │   │
+│  └────────────────────────────────────────────────────────────────────┘   │
+└───────────────────────────────────────────────────────────────────────────┘
+                               │
+          ┌────────────────────┼─────────────────────┐
+          ▼                    ▼                      ▼
+  ┌────────────────┐  ┌─────────────────┐  ┌──────────────────┐
+  │ Unity Catalog   │  │ Genie Space     │  │ SQL Warehouse    │
+  │                 │  │                 │  │                  │
+  │ Gold tables     │  │ NL → SQL over   │  │ H3 functions     │
+  │ Analysis tables │  │ gold + analysis │  │ ai_query() LLM   │
+  │ Hex2Vec model   │  │ tables          │  │                  │
+  └────────────────┘  └─────────────────┘  └──────────────────┘
+          ▲
+  ┌────────────────┐
+  │ ETL Job (DABs) │
+  │                │
+  │ CARTO Overture │
+  │ → gold tables  │
+  │ → analysis DDL │
+  │ → Genie Space  │
+  │ → Hex2Vec      │
+  └────────────────┘
+```
 
 ---
 
 ## Project Structure
 
 ```
-site_selection_accelerator/
-├── databricks.yml                    # Asset Bundle config (catalog, schema, warehouse)
-├── pyproject.toml                    # Root uv workspace config
-├── README.md                         # This file
-├── HEX2VEC_EXPLAINER.md             # Deep dive into the Hex2Vec algorithm
-├── INTEGRATION_PLAN.md              # Detailed technical notes
+site-selection-accelerator/
+├── databricks.yml                        # Bundle config — catalog, schema, warehouse
+├── pyproject.toml                        # Root uv workspace
 ├── resources/
-│   ├── site_selection_app.yml        # Databricks App resource definition
-│   └── geospatial_etl_job.yml        # ETL job: SQL + Python tasks
-├── packages/app/                     # apx full-stack application
-│   ├── app.yml                       # App runtime config (command, env vars)
-│   ├── pyproject.toml                # Python dependencies + build config
-│   ├── package.json                  # Frontend dependencies
-│   ├── .env                          # Local dev env vars (not committed)
+│   ├── site_selection_app.yml            # Databricks App resource
+│   └── geospatial_etl_job.yml            # ETL job (SQL + Python tasks)
+├── packages/app/                         # Full-stack application (apx)
+│   ├── app.yml                           # App runtime config (env vars)
+│   ├── pyproject.toml                    # Python dependencies
+│   ├── package.json                      # Frontend dependencies
 │   └── src/site_selection/
 │       ├── backend/
-│       │   ├── app.py                # FastAPI app entry point
-│       │   ├── router.py             # API routes (config, analyze SSE, results, fingerprint)
-│       │   ├── models.py             # Pydantic request/response models
-│       │   ├── cache.py              # In-memory session cache for pipeline results
-│       │   └── core/                 # App factory, config, dependencies
+│       │   ├── app.py                    # FastAPI entry point
+│       │   ├── router.py                 # API routes
+│       │   ├── models.py                 # Pydantic models
+│       │   └── cache.py                  # In-memory session cache
 │       └── ui/
-│           ├── routes/index.tsx      # Main page: map + sidebar + dialogs
+│           ├── routes/index.tsx          # Main page
 │           ├── components/
-│           │   ├── map/              # deck.gl map with H3, scatterplot, GeoJSON layers
-│           │   ├── sidebar/          # Collapsible config panel with SSE progress
-│           │   ├── brand-profile/    # Brand profile dialog (avg chart + breakdown)
-│           │   └── fingerprint/      # Hexagon detail slide-in panel
+│           │   ├── map/                  # deck.gl map layers
+│           │   ├── sidebar/              # Config panel with Save Analysis
+│           │   ├── brand-profile/        # Brand profile dialog
+│           │   ├── fingerprint/          # Hexagon detail panel
+│           │   └── assets/               # Assets dialog
 │           └── lib/
-│               ├── types.ts          # TypeScript interfaces matching Pydantic models
-│               └── use-analyze.ts    # React hook for SSE-based pipeline execution
+│               ├── types.ts              # TypeScript interfaces
+│               └── use-analyze.ts        # SSE analysis hook
 └── src/
-    ├── app/                          # Legacy Python modules (reused by backend)
-    │   ├── config.py                 # Gold table refs, categories, Genie Space ID
-    │   ├── db.py                     # SQL execution via Databricks SDK Statement API
-    │   ├── pipeline.py               # DBSQL queries on gold tables
-    │   ├── embeddings.py             # SRAI Hex2Vec embedding pipeline
-    │   ├── similarity.py             # Cosine similarity + opportunity scoring
-│   ├── brand_search.py           # Brand discovery (Genie) + competition analysis
-│   └── explainability.py         # Score explainability, LLM fingerprint insights, competition detail
+    ├── app/                              # Python modules
+    │   ├── config.py                     # Table refs, categories, constants
+    │   ├── db.py                         # DBSQL execution via SDK
+    │   ├── pipeline.py                   # Geospatial queries
+    │   ├── embeddings.py                 # SRAI Hex2Vec pipeline
+    │   ├── similarity.py                 # Cosine similarity + opportunity scoring
+    │   ├── brand_search.py               # Genie brand discovery + competition
+    │   ├── explainability.py             # Score explanations + LLM insights
+    │   └── persist.py                    # Delta table persistence
     └── pipeline/
-        ├── setup_genie_space.py      # Genie Space provisioning (create/update/persist)
-        ├── train_hex2vec.py          # Multi-city Hex2Vec pre-training (DAB job task)
+        ├── setup_genie_space.py          # Genie Space provisioning
+        ├── train_hex2vec.py              # Multi-city Hex2Vec training
         └── transformations/
-            ├── setup_schema.sql      # CREATE SCHEMA IF NOT EXISTS
-            ├── gold_cities.sql       # CTAS: cities + ST_Union'd polygons + bboxes
-            ├── gold_places.sql       # CTAS: flattened POIs with extracted coords
-            ├── gold_buildings.sql    # CTAS: building centroids + categories + H3 + ZORDER
-            └── gold_places_enriched.sql  # CTAS: comprehensive POI table for Genie
+            ├── setup_schema.sql
+            ├── gold_cities.sql
+            ├── gold_places.sql
+            ├── gold_buildings.sql
+            ├── gold_places_enriched.sql
+            └── analysis_tables.sql       # Analysis result DDL
 ```
 
 ---
 
-## Key Libraries and Functions
+## How It Works
 
-### Databricks SQL Geospatial & H3 Functions
+### ETL Pipeline (one-time setup)
 
-| Function | Purpose |
-|---|---|
-| `h3_polyfillash3(wkt, res)` | Tessellate a polygon (WKT string) into H3 cells |
-| `h3_longlatash3(lon, lat, res)` | Assign a point to its H3 cell |
-| `h3_h3tostring(cell)` | Convert H3 BIGINT to hex string |
-| `h3_centerasgeojson(cell)` | Get the centre point of an H3 cell |
-| `ST_GeomFromWKB(wkb)` | Parse WKB into geometry (used in gold_cities ETL) |
-| `ST_Union(geom1, geom2)` | Merge two geometries into one (used to combine multi-level polygons) |
-| `ST_AsText(geom)` | Convert geometry to WKT string |
+The `geospatial_etl_job` runs these tasks in order:
 
-### Frontend Libraries
+1. **Create schema** — `CREATE SCHEMA IF NOT EXISTS {catalog}.{schema}`
+2. **Gold tables** — transform CARTO Overture Maps into optimised lookup tables
+   (`gold_cities`, `gold_places`, `gold_buildings`, `gold_places_enriched`)
+3. **Analysis tables** — create the five analysis result tables
+4. **Genie Space** — provision a Genie Space with H3 spatial instructions,
+   analysis table instructions, and example queries; grant the app service
+   principal `CAN_RUN` access
+5. **Hex2Vec training** — train an embedding model on 37 cities and save to a
+   UC Volume
 
-| Library | Purpose |
-|---|---|
-| `deck.gl` / `@deck.gl/react` | WebGL map rendering with H3, scatterplot, and GeoJSON layers |
-| `react-map-gl` + `maplibre-gl` | Basemap integration with MapLibre GL |
-| `recharts` | React charting library for brand profile and fingerprint charts |
-| `shadcn/ui` | UI component library (dialogs, sheets, selects, sliders, etc.) |
-| `@tanstack/react-router` | File-based routing for React |
+### Analysis Pipeline (per run)
 
-### Python Libraries
+1. **Brand resolution** — discover locations via Genie (brand name), geocoding
+   (addresses), or direct input (coordinates / map drawing)
+2. **Tessellation** — fill the target city polygon with H3 cells
+3. **Feature assembly** — query POIs and buildings, merge into a unified feature
+   table
+4. **Hex2Vec embeddings** — transform features using the pretrained model (or
+   train from scratch as fallback)
+5. **Similarity scoring** — cosine similarity between brand profile and every
+   city cell
+6. **Competition analysis** — find competitor POIs in high-similarity cells,
+   compute opportunity scores
+7. **Persist (optional)** — save all results to Delta when the user clicks
+   Save Analysis
 
-| Library | Purpose |
-|---|---|
-| `fastapi` | API backend with SSE streaming for long-running pipeline |
-| `srai` (Hex2VecEmbedder) | Learned dense geospatial embeddings from POI tag patterns |
-| `h3` | Client-side H3 cell ↔ polygon conversions, k-ring neighbourhoods |
-| `geopandas` / `shapely` | GeoDataFrame construction for SRAI |
-| `scikit-learn` | `cosine_similarity` for scoring |
-| `geopy` | Optional address geocoding via Nominatim |
-| `databricks-sdk` | Workspace auth, SQL Statement Execution API, Genie API, Foundation Model API |
-| `python-dotenv` | Load `.env` variables for local development |
+---
+
+## Local Development
+
+```bash
+uv sync
+uv run apx bun install
+
+# Create packages/app/.env:
+#   DATABRICKS_CONFIG_PROFILE=DEFAULT
+#   GOLD_CATALOG=my_catalog
+#   GOLD_SCHEMA=site_selection
+#   DATABRICKS_WAREHOUSE_ID=<your-warehouse-id>
+
+uv run apx dev start    # backend + frontend + OpenAPI watcher
+uv run apx dev status   # check health
+uv run apx dev logs     # view logs
+uv run apx dev check    # type checks (TypeScript + Python)
+uv run apx dev stop     # stop servers
+```
+
+---
+
+## Configuration Reference
+
+All configuration is in two files:
+
+| File | Setting | Purpose |
+|---|---|---|
+| `databricks.yml` | `variables.catalog` | Unity Catalog catalog for all tables |
+| `databricks.yml` | `variables.schema` | Schema for all tables |
+| `databricks.yml` | `variables.warehouse_id` | SQL warehouse (by name lookup) |
+| `packages/app/app.yml` | `GOLD_CATALOG` env | Must match `variables.catalog` |
+| `packages/app/app.yml` | `GOLD_SCHEMA` env | Must match `variables.schema` |
+| `packages/app/app.yml` | `GENIE_SPACE_ID` env | Leave empty for auto-provisioning |
+
+To change catalog/schema: update both files, then re-run `databricks bundle deploy`
+and `databricks bundle run geospatial_etl_job`.
 
 ---
 
 ## Extending the Accelerator
 
-- **Change catalog/schema** — update `databricks.yml` variables and
-  `packages/app/app.yml` env vars (`GOLD_CATALOG`, `GOLD_SCHEMA`), then re-run
-  the ETL job.
-- **Add new POI categories** — edit `CATEGORY_GROUPS` in `config.py` and the
-  `WHERE` clause in `gold_places.sql`, then re-run the ETL job.
-- **Add new building categories** — edit `BUILDING_CATEGORY_GROUPS` in
-  `config.py` and the `building_category`/`height_bin` logic in
-  `gold_buildings.sql`, then re-run the ETL job.
-- **Refresh gold tables** — run `databricks bundle run geospatial_etl_job`
-  whenever the upstream CARTO data updates. This also updates the Genie Space
-  instructions.
-- **Custom Genie instructions** — edit `setup_genie_space.py` to add
-  domain-specific instructions or example question-SQL pairs.
-- **Retrain Hex2Vec** — edit `HEX2VEC_TRAINING_CITIES` in `config.py` to
-  change the city set, or adjust `PRETRAIN_ENCODER_SIZES` / `PRETRAIN_EPOCHS`
-  / `PRETRAIN_BATCH_SIZE`, then re-run the ETL job. The `train_hex2vec` task
-  saves the new model to the UC Volume; the app picks it up on next restart.
-- **Alternative embedders** — swap `Hex2VecEmbedder` for SRAI's
-  `CountEmbedder` (no training needed, faster) or
-  `ContextualCountEmbedder` (neighbourhood-aware counts).
+- **Add POI categories** — edit `CATEGORY_GROUPS` in `src/app/config.py` and
+  the `WHERE` clause in `gold_places.sql`, then re-run the ETL.
+- **Add building categories** — edit `BUILDING_CATEGORY_GROUPS` in `config.py`
+  and the logic in `gold_buildings.sql`.
+- **Retrain Hex2Vec** — edit `HEX2VEC_TRAINING_CITIES` in `config.py`, then
+  re-run the ETL. The app picks up the new model on next restart.
+- **Custom Genie instructions** — edit `src/pipeline/setup_genie_space.py`.
+- **Refresh data** — run `databricks bundle run geospatial_etl_job` whenever
+  the upstream CARTO data updates.
 
 ---
 
@@ -534,18 +379,13 @@ site_selection_accelerator/
 
 | Issue | Resolution |
 |---|---|
-| "None of the brand locations fall within the analysed H3 cells" | Brand-neighbourhood POI data may be too sparse. Try selecting more POI categories or a coarser H3 resolution. |
-| "No POIs found" | The category filter may be too restrictive. Broaden the category selection. |
-| Gold tables don't exist | Run the ETL job first: `databricks bundle run geospatial_etl_job` |
-| Genie returns empty results | Check that `gold_places_enriched` exists and the Genie Space has correct instructions. Run `setup_genie_space.py` to recreate. |
-| Slow embedding training | Reduce H3 resolution (fewer cells) or reduce `max_epochs` in `embeddings.py`. |
-| SQL warehouse timeout | Increase the timeout on your warehouse or use a larger warehouse size. |
-| App deployment fails | Check the Logs tab in the Databricks Apps UI. Verify `DATABRICKS_WAREHOUSE_ID` and gold table env vars are set in `packages/app/app.yml`. |
-| Dropdowns empty in deployed app | Ensure legacy modules are bundled: `pyproject.toml` should have `[tool.hatch.build.targets.wheel.force-include]` mapping `../../src/app` to `site_selection/_legacy`. |
-| `bundle deploy` doesn't upload latest build | Ensure `sync.include: [packages/app/.build]` is present in `databricks.yml`. Without it, the `.build/.gitignore` (which contains `*`) causes the bundle to skip all build artifacts. |
-| Fingerprint insight missing (fallback text shown) | The LLM call via `ai_query()` may have failed. Check backend logs for `Fingerprint ai_query failed`. Verify the SQL warehouse has access to Foundation Model endpoints. |
-| API error: 404 when clicking hexagons | The app uses an in-memory session cache. Running with multiple workers (`--workers 2+`) causes cache misses if requests hit different processes. Keep `--workers 1` in `app.yml`. |
-| `ChatMessage` / SDK errors in brand search | Databricks SDK v0.100+ requires `ChatMessage` objects (not plain dicts) for `serving_endpoints.query()`. Import `ChatMessage` and `ChatMessageRole` from `databricks.sdk.service.serving`. |
+| Gold tables don't exist | Run `databricks bundle run geospatial_etl_job` |
+| Genie returns empty results | Verify `gold_places_enriched` exists; re-run `setup_genie_space.py` |
+| "No POIs found" | Broaden category selection or use a coarser H3 resolution |
+| Save Analysis fails | Check that analysis tables exist (run ETL, or the app creates them on first save) |
+| Fingerprint shows fallback text | SQL warehouse may lack Foundation Model access; check backend logs |
+| Dropdowns empty in deployed app | Verify `GOLD_CATALOG` and `GOLD_SCHEMA` in `app.yml` match your tables |
+| `bundle deploy` skips build | Ensure `sync.include: [packages/app/.build]` is in `databricks.yml` |
 
 ---
 

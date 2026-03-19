@@ -12,6 +12,12 @@ GOLD_PLACES_ENRICHED = f"{_CATALOG}.{_SCHEMA}.gold_places_enriched"
 GOLD_BUILDINGS_TABLE = f"{_CATALOG}.{_SCHEMA}.gold_buildings"
 APP_CONFIG_TABLE = f"{_CATALOG}.{_SCHEMA}.app_config"
 
+ANALYSES_TABLE = f"{_CATALOG}.{_SCHEMA}.analyses"
+ANALYSIS_BRAND_PROFILES_TABLE = f"{_CATALOG}.{_SCHEMA}.analysis_brand_profiles"
+ANALYSIS_HEXAGONS_TABLE = f"{_CATALOG}.{_SCHEMA}.analysis_hexagons"
+ANALYSIS_FINGERPRINTS_TABLE = f"{_CATALOG}.{_SCHEMA}.analysis_fingerprints"
+ANALYSIS_COMPETITORS_TABLE = f"{_CATALOG}.{_SCHEMA}.analysis_competitors"
+
 _log = logging.getLogger(__name__)
 
 

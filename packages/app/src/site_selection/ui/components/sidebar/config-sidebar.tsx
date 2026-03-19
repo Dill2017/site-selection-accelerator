@@ -25,7 +25,10 @@ import {
   MapPin,
   Crosshair,
   Trash2,
+  Save,
+  Check,
 } from "lucide-react";
+import { toast } from "sonner";
 import type { AppConfig, AnalyzeRequest, CategoryGroup } from "@/lib/types";
 import { STEP_LABELS } from "@/lib/types";
 
@@ -37,6 +40,7 @@ interface ConfigSidebarProps {
   stepLabel: string;
   error: string | null;
   hasResult: boolean;
+  sessionId: string | null;
   onRun: (req: AnalyzeRequest) => void;
   onShowBrandProfile: () => void;
   onBrandModeChange?: (mode: BrandMode) => void;
@@ -51,6 +55,7 @@ export function ConfigSidebar({
   stepLabel,
   error,
   hasResult,
+  sessionId,
   onRun,
   onShowBrandProfile,
   onBrandModeChange,
@@ -74,6 +79,12 @@ export function ConfigSidebar({
   const [includeBuildings, setIncludeBuildings] = useState(true);
 
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [isSaving, setIsSaving] = useState(false);
+  const [savedAnalysisId, setSavedAnalysisId] = useState<string | null>(null);
+
+  useEffect(() => {
+    setSavedAnalysisId(null);
+  }, [sessionId]);
 
   const handleBrandModeChange = useCallback(
     (mode: BrandMode) => {
@@ -178,6 +189,44 @@ export function ConfigSidebar({
       include_buildings: includeBuildings,
     });
   }, [canRun, isMapMode, drawnFeatures, brandMode, brandValue, country, city, resolution, selectedCats, enableCompetition, beta, includeBuildings, onRun]);
+
+  const handleSave = useCallback(async () => {
+    if (!sessionId) return;
+    setIsSaving(true);
+    try {
+      const brandInput = isMapMode
+        ? { mode: "map_selection" as const, value: "", geojson: drawnFeatures }
+        : { mode: brandMode, value: brandValue };
+
+      const res = await fetch(`/api/results/${sessionId}/persist-with-context`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          country,
+          city,
+          resolution,
+          categories: Array.from(selectedCats),
+          brand_input: brandInput,
+          enable_competition: enableCompetition,
+          beta,
+          include_buildings: includeBuildings,
+        }),
+      });
+
+      if (!res.ok) throw new Error(`Save failed: ${res.status}`);
+      const data = await res.json();
+      setSavedAnalysisId(data.analysis_id);
+      toast.success("Analysis saved to Delta tables", {
+        description: `ID: ${data.analysis_id.slice(0, 8)}...`,
+      });
+    } catch (err) {
+      toast.error("Failed to save analysis", {
+        description: err instanceof Error ? err.message : "Unknown error",
+      });
+    } finally {
+      setIsSaving(false);
+    }
+  }, [sessionId, isMapMode, drawnFeatures, brandMode, brandValue, country, city, resolution, selectedCats, enableCompetition, beta, includeBuildings]);
 
   if (collapsed) {
     return (
@@ -391,14 +440,40 @@ export function ConfigSidebar({
           )}
         </Button>
         {hasResult && (
-          <Button
-            variant="outline"
-            size="sm"
-            className="w-full"
-            onClick={onShowBrandProfile}
-          >
-            View Brand Profile
-          </Button>
+          <div className="flex gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              className="flex-1"
+              onClick={onShowBrandProfile}
+            >
+              View Brand Profile
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              className="flex-1"
+              onClick={handleSave}
+              disabled={isSaving || !!savedAnalysisId}
+            >
+              {savedAnalysisId ? (
+                <>
+                  <Check className="mr-1.5 h-3.5 w-3.5" />
+                  Saved
+                </>
+              ) : isSaving ? (
+                <>
+                  <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                  Saving...
+                </>
+              ) : (
+                <>
+                  <Save className="mr-1.5 h-3.5 w-3.5" />
+                  Save Analysis
+                </>
+              )}
+            </Button>
+          </div>
         )}
       </div>
     </div>

@@ -4,6 +4,7 @@ import { OpportunityMap } from "@/components/map/opportunity-map";
 import { ConfigSidebar } from "@/components/sidebar/config-sidebar";
 import { BrandProfileDialog } from "@/components/brand-profile/brand-profile-dialog";
 import { FingerprintPanel } from "@/components/fingerprint/fingerprint-panel";
+import { AssetsPopover } from "@/components/assets/assets-popover";
 import { useAnalyze } from "@/lib/use-analyze";
 import { useMapDraw } from "@/lib/use-map-draw";
 import type { HexagonData, DrawingMode } from "@/lib/types";
@@ -69,6 +70,7 @@ function Index() {
         stepLabel={analyzer.stepLabel}
         error={analyzer.error}
         hasResult={hasResults}
+        sessionId={sessionId}
         onRun={analyzer.run}
         onShowBrandProfile={() => setShowBrandProfile(true)}
         onBrandModeChange={setBrandMode}
@@ -76,6 +78,10 @@ function Index() {
         drawnFeatureCounts={counts}
         onClearDrawnFeatures={clear}
       />
+
+      <div className="absolute bottom-4 right-4 z-20">
+        <AssetsPopover />
+      </div>
 
       <BrandProfileDialog
         open={showBrandProfile}

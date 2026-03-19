@@ -13,7 +13,10 @@ from .core import create_router
 from .models import (
     AnalyzeRequest,
     AnalyzeResultOut,
+    AnalysisSummary,
     AppConfigOut,
+    AssetLink,
+    AssetsOut,
     BrandLocationData,
     BrandPOIRow,
     BrandProfileOut,
@@ -26,6 +29,7 @@ from .models import (
     GenieDebugOut,
     HexagonData,
     HexagonDetailOut,
+    PersistResultOut,
     VersionOut,
 )
 from . import cache
@@ -541,6 +545,173 @@ async def get_genie_debug(session_id: str):
         brand_pois=brand_rows,
         total_brand_pois=len(brand_rows),
         competitor_pois_total=competitor_total,
+    )
+
+
+# -- Persist Analysis ---------------------------------------------------------
+
+@router.post(
+    "/results/{session_id}/persist",
+    response_model=PersistResultOut,
+    operation_id="persistAnalysis",
+)
+async def persist_analysis(session_id: str):
+    """Persist the in-memory analysis results to Delta tables."""
+    from fastapi import Request as FastAPIRequest
+
+    pr = _get_result(session_id)
+    from persist import persist_analysis as do_persist
+
+    city_polygon_geojson = _wkt_to_geojson(pr.city_polygon_wkt) if pr.city_polygon_wkt else None
+
+    resolution = h3.get_resolution(_h3_int_to_hex(pr.scored["h3_cell"].iloc[0]))
+    request_data = {
+        "brand_input_mode": "",
+        "brand_input_value": "",
+        "country": "",
+        "city": "",
+        "resolution": resolution,
+        "categories": [],
+        "enable_competition": "opportunity_score" in pr.scored.columns,
+        "beta": 1.0,
+        "include_buildings": True,
+    }
+
+    center_lat = float(pr.city_h3_cells_df["center_lat"].mean())
+    center_lon = float(pr.city_h3_cells_df["center_lon"].mean())
+
+    result = do_persist(
+        session_id=session_id,
+        request_data=request_data,
+        pipeline_result=pr,
+        city_polygon_geojson=city_polygon_geojson,
+        center_lat=center_lat,
+        center_lon=center_lon,
+    )
+    return PersistResultOut(
+        analysis_id=result["analysis_id"],
+        tables_written=result["tables_written"],
+    )
+
+
+@router.post(
+    "/results/{session_id}/persist-with-context",
+    response_model=PersistResultOut,
+    operation_id="persistAnalysisWithContext",
+)
+async def persist_analysis_with_context(session_id: str, req: AnalyzeRequest):
+    """Persist analysis results to Delta, using the original request for metadata."""
+    pr = _get_result(session_id)
+    from persist import persist_analysis as do_persist
+
+    city_polygon_geojson = _wkt_to_geojson(pr.city_polygon_wkt) if pr.city_polygon_wkt else None
+    center_lat = float(pr.city_h3_cells_df["center_lat"].mean())
+    center_lon = float(pr.city_h3_cells_df["center_lon"].mean())
+
+    request_data = {
+        "brand_input_mode": req.brand_input.mode,
+        "brand_input_value": req.brand_input.value,
+        "country": req.country,
+        "city": req.city,
+        "resolution": req.resolution,
+        "categories": req.categories,
+        "enable_competition": req.enable_competition,
+        "beta": req.beta,
+        "include_buildings": req.include_buildings,
+    }
+
+    result = do_persist(
+        session_id=session_id,
+        request_data=request_data,
+        pipeline_result=pr,
+        city_polygon_geojson=city_polygon_geojson,
+        center_lat=center_lat,
+        center_lon=center_lon,
+    )
+    return PersistResultOut(
+        analysis_id=result["analysis_id"],
+        tables_written=result["tables_written"],
+    )
+
+
+# -- Assets -------------------------------------------------------------------
+
+@router.get("/assets", response_model=AssetsOut, operation_id="getAssets")
+async def get_assets():
+    """Return links to all Databricks assets produced by this accelerator."""
+    import os
+    from config import (
+        GENIE_SPACE_ID,
+        GOLD_CITIES_TABLE,
+        GOLD_PLACES_TABLE,
+        GOLD_PLACES_ENRICHED,
+        GOLD_BUILDINGS_TABLE,
+        ANALYSES_TABLE,
+        ANALYSIS_BRAND_PROFILES_TABLE,
+        ANALYSIS_HEXAGONS_TABLE,
+        ANALYSIS_FINGERPRINTS_TABLE,
+        ANALYSIS_COMPETITORS_TABLE,
+        HEX2VEC_VOLUME_PATH,
+    )
+    from persist import list_analyses
+
+    host = os.getenv("DATABRICKS_HOST", "")
+    if host and not host.startswith("https://"):
+        host = f"https://{host}"
+    host = host.rstrip("/")
+
+    links: list[AssetLink] = []
+
+    if host:
+        links.append(AssetLink(name="Databricks Workspace", url=host, asset_type="workspace"))
+
+    if GENIE_SPACE_ID:
+        links.append(AssetLink(
+            name="Genie Space (Brand Explorer)",
+            url=f"{host}/genie/rooms/{GENIE_SPACE_ID}" if host else "",
+            asset_type="genie",
+        ))
+
+    links.append(AssetLink(
+        name="Hex2Vec Pretrained Model",
+        url=f"{host}/explore/data/volumes{HEX2VEC_VOLUME_PATH}" if host else HEX2VEC_VOLUME_PATH,
+        asset_type="volume",
+    ))
+
+    gold_tables = [
+        ("Gold Cities", GOLD_CITIES_TABLE),
+        ("Gold Places", GOLD_PLACES_TABLE),
+        ("Gold Places Enriched", GOLD_PLACES_ENRICHED),
+        ("Gold Buildings", GOLD_BUILDINGS_TABLE),
+    ]
+    analysis_tables = [
+        ("Analyses Registry", ANALYSES_TABLE),
+        ("Analysis Brand Profiles", ANALYSIS_BRAND_PROFILES_TABLE),
+        ("Analysis Hexagons", ANALYSIS_HEXAGONS_TABLE),
+        ("Analysis Fingerprints", ANALYSIS_FINGERPRINTS_TABLE),
+        ("Analysis Competitors", ANALYSIS_COMPETITORS_TABLE),
+    ]
+    for label, fqn in gold_tables + analysis_tables:
+        parts = fqn.split(".")
+        table_url = f"{host}/explore/data/{'/'.join(parts)}" if host and len(parts) == 3 else ""
+        links.append(AssetLink(name=label, url=table_url, asset_type="table"))
+
+    recent = list_analyses(limit=10)
+    analyses = [
+        AnalysisSummary(
+            analysis_id=str(r.get("analysis_id", "")),
+            brand_input_value=str(r.get("brand_input_value", "")),
+            city=str(r.get("city", "")),
+            country=str(r.get("country", "")),
+            created_at=str(r.get("created_at", "")),
+        )
+        for r in recent
+    ]
+
+    return AssetsOut(
+        workspace_url=host,
+        links=links,
+        recent_analyses=analyses,
     )
 
 

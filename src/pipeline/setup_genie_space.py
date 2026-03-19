@@ -33,19 +33,32 @@ GENIE_DESCRIPTION = (
 )
 
 
-def _build_serialized_space(catalog: str, schema: str) -> str:
+def _build_serialized_space(catalog: str, schema: str, include_analysis_tables: bool = True) -> str:
     """Build the full serialized_space JSON with tables, instructions,
     and sample question-SQL pairs."""
     enriched_table = f"{catalog}.{schema}.gold_places_enriched"
     cities_table = f"{catalog}.{schema}.gold_cities"
 
+    tables = [
+        {"identifier": cities_table},
+        {"identifier": enriched_table},
+    ]
+
+    if include_analysis_tables:
+        analysis_table_names = [
+            "analyses",
+            "analysis_brand_profiles",
+            "analysis_hexagons",
+            "analysis_fingerprints",
+            "analysis_competitors",
+        ]
+        for t in analysis_table_names:
+            tables.append({"identifier": f"{catalog}.{schema}.{t}"})
+
     return json.dumps({
         "version": 2,
         "data_sources": {
-            "tables": sorted([
-                {"identifier": cities_table},
-                {"identifier": enriched_table},
-            ], key=lambda t: t["identifier"]),
+            "tables": sorted(tables, key=lambda t: t["identifier"]),
         },
         "config": {
             "sample_questions": [
@@ -122,6 +135,32 @@ def _build_serialized_space(catalog: str, schema: str) -> str:
                         "ILIKE. Use OR:\n",
                         "  (p.brand_name_primary ILIKE '%Brand%' "
                         "OR p.poi_primary_name ILIKE '%Brand%')\n",
+                        "\n",
+                        "ANALYSIS RESULTS — The app persists analysis "
+                        "outcomes to Delta tables. Each analysis run has a "
+                        "unique analysis_id.\n",
+                        "\n",
+                        "Key tables:\n",
+                        f"  {catalog}.{schema}.analyses — registry of all "
+                        "runs (brand, city, parameters, timestamps)\n",
+                        f"  {catalog}.{schema}.analysis_hexagons — scored "
+                        "H3 hexagons with similarity and opportunity scores\n",
+                        f"  {catalog}.{schema}.analysis_brand_profiles — "
+                        "average POI/building category breakdown per analysis\n",
+                        f"  {catalog}.{schema}.analysis_fingerprints — "
+                        "per-hexagon category comparison with LLM insights\n",
+                        f"  {catalog}.{schema}.analysis_competitors — "
+                        "competitor POIs found in high-similarity cells\n",
+                        "\n",
+                        "To query a specific analysis, always filter by "
+                        "analysis_id. Join analysis_hexagons to analyses "
+                        "on analysis_id to get the brand/city context.\n",
+                        "Example: SELECT h.hex_id, h.similarity FROM "
+                        f"{catalog}.{schema}.analysis_hexagons h JOIN "
+                        f"{catalog}.{schema}.analyses a ON "
+                        "a.analysis_id = h.analysis_id WHERE "
+                        "a.brand_input_value ILIKE '%Starbucks%' "
+                        "ORDER BY h.similarity DESC LIMIT 10\n",
                     ],
                 },
             ],
