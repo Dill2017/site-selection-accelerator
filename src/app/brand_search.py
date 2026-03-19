@@ -341,6 +341,7 @@ def find_competitors_in_similar_cells(
     min_similarity: float = 0.5,
     country: str = "",
     city: str = "",
+    resolution: int = 9,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Find competitors in high-similarity cells via direct SQL on
     gold_places_enriched with polygon-based city filtering.
@@ -387,12 +388,12 @@ def find_competitors_in_similar_cells(
 
     query = f"""
     SELECT p.poi_id AS id,
-           h3_h3tostring(h3_longlatash3(p.lon, p.lat, 9)) AS h3,
+           h3_h3tostring(h3_longlatash3(p.lon, p.lat, {resolution})) AS h3,
            p.poi_primary_name, p.basic_category,
            p.poi_primary_category, p.brand_name_primary,
            p.address_line, p.locality, p.region, p.country
     FROM {cfg.GOLD_PLACES_ENRICHED} p
-    WHERE h3_h3tostring(h3_longlatash3(p.lon, p.lat, 9)) IN ({h3_list})
+    WHERE h3_h3tostring(h3_longlatash3(p.lon, p.lat, {resolution})) IN ({h3_list})
       AND (p.basic_category IN ({cat_list}) OR p.poi_primary_category IN ({cat_list}))
       AND p.lon IS NOT NULL AND p.lat IS NOT NULL
     """

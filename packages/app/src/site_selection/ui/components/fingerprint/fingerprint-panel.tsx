@@ -21,7 +21,8 @@ import {
   Legend,
   ResponsiveContainer,
 } from "recharts";
-import type { HexagonData, HexagonDetail } from "@/lib/types";
+import { ChevronDown } from "lucide-react";
+import type { HexagonData, HexagonDetail, GenieDebug } from "@/lib/types";
 
 interface FingerprintPanelProps {
   hex: HexagonData | null;
@@ -35,6 +36,7 @@ export function FingerprintPanel({
   onClose,
 }: FingerprintPanelProps) {
   const [detail, setDetail] = useState<HexagonDetail | null>(null);
+  const [genieDebug, setGenieDebug] = useState<GenieDebug | null>(null);
   const [loading, setLoading] = useState(false);
   const [chartStyle, setChartStyle] = useState<"bar" | "line">("bar");
   const [metric, setMetric] = useState<"counts" | "pct">("pct");
@@ -49,13 +51,21 @@ export function FingerprintPanel({
     }
     setLoading(true);
     setError(null);
-    fetch(`/api/results/${sessionId}/hexagon/${hex.hex_id}`)
+
+    const detailP = fetch(`/api/results/${sessionId}/hexagon/${hex.hex_id}`)
       .then((r) => {
         if (!r.ok) throw new Error(`API error: ${r.status}`);
         return r.json();
-      })
-      .then((data: HexagonDetail) => {
-        setDetail(data);
+      });
+
+    const debugP = fetch(`/api/results/${sessionId}/debug`)
+      .then((r) => (r.ok ? r.json() : null))
+      .catch(() => null);
+
+    Promise.all([detailP, debugP])
+      .then(([detailData, debugData]: [HexagonDetail, GenieDebug | null]) => {
+        setDetail(detailData);
+        setGenieDebug(debugData);
         setLoading(false);
       })
       .catch((e) => {
@@ -113,11 +123,79 @@ export function FingerprintPanel({
               </div>
             )}
 
+            {/* Competitor POIs table */}
+            {detail.competitor_pois && detail.competitor_pois.length > 0 && (
+              <details className="group">
+                <summary className="flex cursor-pointer items-center justify-between text-xs font-medium hover:underline list-none">
+                  <span>Competitor POIs in this cell ({detail.competitor_pois.length})</span>
+                  <ChevronDown className="h-3.5 w-3.5 transition-transform group-open:rotate-180" />
+                </summary>
+                <div className="mt-1 max-h-48 overflow-auto rounded border">
+                  <table className="w-full text-xs">
+                    <thead className="bg-muted/50 sticky top-0">
+                      <tr>
+                        <th className="px-2 py-1 text-left font-medium">Name</th>
+                        <th className="px-2 py-1 text-left font-medium">Category</th>
+                        <th className="px-2 py-1 text-left font-medium">Brand</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {detail.competitor_pois.map((poi, i) => (
+                        <tr key={i} className="border-t">
+                          <td className="px-2 py-1">{poi.name}</td>
+                          <td className="px-2 py-1 text-muted-foreground">{poi.category}</td>
+                          <td className="px-2 py-1 text-muted-foreground">{poi.brand || "—"}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </details>
+            )}
+
             {/* Explanation summary */}
             {detail.explanation_summary && (
               <div className="rounded-md border bg-muted/50 px-3 py-2 text-xs">
                 {detail.explanation_summary}
               </div>
+            )}
+
+            <Separator />
+
+            {/* Genie Debug */}
+            {genieDebug && genieDebug.brand_pois.length > 0 && (
+              <details className="group">
+                <summary className="flex cursor-pointer items-center justify-between text-xs font-medium hover:underline list-none">
+                  <span>
+                    Genie Results ({genieDebug.total_brand_pois} brand POIs, {genieDebug.competitor_pois_total} competitors)
+                  </span>
+                  <ChevronDown className="h-3.5 w-3.5 transition-transform group-open:rotate-180" />
+                </summary>
+                <div className="mt-1 max-h-48 overflow-auto rounded border">
+                  <table className="w-full text-xs">
+                    <thead className="bg-muted/50 sticky top-0">
+                      <tr>
+                        <th className="px-2 py-1 text-left font-medium">Name</th>
+                        <th className="px-2 py-1 text-left font-medium">Category</th>
+                        <th className="px-2 py-1 text-left font-medium">Brand</th>
+                        <th className="px-2 py-1 text-left font-medium">H3</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {genieDebug.brand_pois.map((poi, i) => (
+                        <tr key={i} className="border-t">
+                          <td className="px-2 py-1">{poi.name}</td>
+                          <td className="px-2 py-1 text-muted-foreground">{poi.category}</td>
+                          <td className="px-2 py-1 text-muted-foreground">{poi.brand || "—"}</td>
+                          <td className="px-2 py-1 text-muted-foreground font-mono text-[10px]">
+                            {poi.h3_cell ? poi.h3_cell.slice(-6) : "—"}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </details>
             )}
 
             <Separator />
