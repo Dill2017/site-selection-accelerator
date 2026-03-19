@@ -272,7 +272,7 @@ following:
 
 ### How the App Uses It
 
-At startup, the Streamlit application attempts to download the pre-trained
+At startup, the application attempts to download the pre-trained
 model from the UC Volume. If a compatible model is found (matching the
 user's selected H3 resolution), the app uses `embedder.transform()` for
 **inference only** — skipping the training step entirely. This reduces

@@ -43,8 +43,7 @@ def _get_workspace_client() -> WorkspaceClient:
     """Return a cached WorkspaceClient.
 
     On Databricks Apps the default Config() uses the service principal.
-    Locally we use the DEFAULT profile (PAT) to avoid databricks-cli
-    subprocess segfaults inside Streamlit.
+    Locally we use the DEFAULT profile (PAT) for authentication.
     """
     global _ws_client
     if _ws_client is not None:

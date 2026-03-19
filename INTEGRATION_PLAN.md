@@ -292,7 +292,7 @@ if os.environ.get("DATABRICKS_RUNTIME_VERSION") or os.environ.get("IS_DATABRICKS
     # On Databricks: service principal (default)
     client = WorkspaceClient()
 else:
-    # Local Streamlit: PAT from [DEFAULT] profile
+    # Local development: PAT from [DEFAULT] profile
     client = WorkspaceClient(profile="DEFAULT")
 ```
 
