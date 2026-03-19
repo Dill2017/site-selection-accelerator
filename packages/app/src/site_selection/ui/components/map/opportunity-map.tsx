@@ -55,6 +55,7 @@ export function OpportunityMap({
   onUndoDrawing,
 }: OpportunityMapProps) {
   const mapRef = useRef<MapRef>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
   const [mapReady, setMapReady] = useState(false);
   const [hoverInfo, setHoverInfo] = useState<{
     x: number;
@@ -119,6 +120,19 @@ export function OpportunityMap({
       onMapReady(mapRef.current.getMap() as unknown as maplibregl.Map);
     }
   }, [mapReady, onMapReady]);
+
+  const isActivelyDrawing = drawingEnabled && drawingMode !== "navigate";
+
+  useEffect(() => {
+    if (!containerRef.current) return;
+    const maplibreCanvas = containerRef.current.querySelector(".maplibregl-canvas");
+    const allCanvases = containerRef.current.querySelectorAll("canvas");
+    for (const canvas of allCanvases) {
+      if (canvas !== maplibreCanvas) {
+        (canvas as HTMLElement).style.pointerEvents = isActivelyDrawing ? "none" : "";
+      }
+    }
+  }, [isActivelyDrawing]);
 
   const layers = useMemo(() => {
     if (!hasResults) return [];
@@ -202,7 +216,7 @@ export function OpportunityMap({
   );
 
   return (
-    <div className="relative w-full h-full">
+    <div ref={containerRef} className="relative w-full h-full">
       <DeckGL
         initialViewState={initialViewState}
         controller={true}
