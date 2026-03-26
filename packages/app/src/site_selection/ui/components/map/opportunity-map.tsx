@@ -34,6 +34,7 @@ function DeckGLOverlay(props: {
 interface OpportunityMapProps {
   hexagons?: HexagonData[];
   brandLocations?: BrandLocationData[];
+  existingTargetLocations?: BrandLocationData[];
   cityPolygonGeoJson?: Record<string, unknown> | null;
   centerLat?: number;
   centerLon?: number;
@@ -51,6 +52,7 @@ interface OpportunityMapProps {
 export function OpportunityMap({
   hexagons = [],
   brandLocations = [],
+  existingTargetLocations = [],
   cityPolygonGeoJson = null,
   centerLat,
   centerLon,
@@ -68,7 +70,8 @@ export function OpportunityMap({
   const [hoverInfo, setHoverInfo] = useState<{
     x: number;
     y: number;
-    hex: HexagonData;
+    hex?: HexagonData;
+    brand?: BrandLocationData;
   } | null>(null);
 
   const hasResults = hexagons.length > 0;
@@ -93,27 +96,37 @@ export function OpportunityMap({
     });
   }, [centerLat, centerLon]);
 
-  const whitespace = useMemo(
+  const renderCells = useMemo(
     () => hexagons.filter((h) => !h.is_brand_cell),
     [hexagons],
   );
 
   const topOpps = useMemo(() => {
-    const sorted = [...whitespace].sort((a, b) => {
+    const sorted = [...renderCells].sort((a, b) => {
       const aScore = hasCompetition ? (a.opportunity_score ?? a.similarity) : a.similarity;
       const bScore = hasCompetition ? (b.opportunity_score ?? b.similarity) : b.similarity;
       return bScore - aScore;
     });
-    return sorted.slice(0, Math.max(1, Math.floor(whitespace.length * 0.02)));
-  }, [whitespace, hasCompetition]);
+    return sorted.slice(0, Math.max(1, Math.floor(renderCells.length * 0.02)));
+  }, [renderCells, hasCompetition]);
+
+  const hexById = useMemo(
+    () => new globalThis.Map(hexagons.map((h) => [h.hex_id, h])),
+    [hexagons],
+  );
+  const brandCountByHex = useMemo(
+    () =>
+      new globalThis.Map(brandLocations.map((b) => [b.hex_id, b.count])),
+    [brandLocations],
+  );
 
   const handleHover = useCallback((info: PickingInfo) => {
     if (info.object && info.x !== undefined && info.y !== undefined) {
-      setHoverInfo({
-        x: info.x,
-        y: info.y,
-        hex: info.object as HexagonData,
-      });
+      if (info.layer?.id === "brand-locations" || info.layer?.id === "existing-target-locations") {
+        setHoverInfo({ x: info.x, y: info.y, brand: info.object as BrandLocationData });
+      } else {
+        setHoverInfo({ x: info.x, y: info.y, hex: info.object as HexagonData });
+      }
     } else {
       setHoverInfo(null);
     }
@@ -121,11 +134,16 @@ export function OpportunityMap({
 
   const handleClick = useCallback(
     (info: PickingInfo) => {
-      if (info.object && info.layer?.id === "h3-heatmap" && onHexClick) {
+      if (!info.object || !onHexClick) return;
+      if (info.layer?.id === "h3-heatmap") {
         onHexClick(info.object as HexagonData);
+      } else if (info.layer?.id === "brand-locations" || info.layer?.id === "existing-target-locations") {
+        const brand = info.object as BrandLocationData;
+        const matched = hexById.get(brand.hex_id);
+        if (matched) onHexClick(matched);
       }
     },
-    [onHexClick],
+    [onHexClick, hexById],
   );
 
   const handleMapLoad = useCallback(() => {
@@ -159,7 +177,7 @@ export function OpportunityMap({
     result.push(
       new H3HexagonLayer<HexagonData>({
         id: "h3-heatmap",
-        data: whitespace,
+          data: renderCells,
         getHexagon: (d) => d.hex_id,
         getFillColor: (d) => scoreToColor(d.similarity),
         getLineColor: [255, 255, 255, 60],
@@ -188,6 +206,24 @@ export function OpportunityMap({
       }),
     );
 
+    if (existingTargetLocations.length > 0) {
+      result.push(
+        new ScatterplotLayer<BrandLocationData>({
+          id: "existing-target-locations",
+          data: existingTargetLocations,
+          getPosition: (d) => [d.lon, d.lat],
+          getFillColor: [100, 140, 255, 160],
+          getLineColor: [30, 50, 200, 255],
+          getRadius: 130,
+          lineWidthMinPixels: 2,
+          stroked: true,
+          pickable: true,
+          radiusMinPixels: 5,
+          radiusMaxPixels: 22,
+        }),
+      );
+    }
+
     result.push(
       new ScatterplotLayer<HexagonData>({
         id: "top-opps",
@@ -202,7 +238,7 @@ export function OpportunityMap({
     );
 
     return result;
-  }, [hasResults, whitespace, brandLocations, topOpps, cityPolygonGeoJson]);
+  }, [hasResults, renderCells, brandLocations, existingTargetLocations, topOpps, cityPolygonGeoJson]);
 
   const isActivelyDrawing = drawingEnabled && drawingMode !== "navigate";
 
@@ -245,7 +281,16 @@ export function OpportunityMap({
             top: hoverInfo.y + 12,
           }}
         >
-          <TooltipContent hex={hoverInfo.hex} hasCompetition={hasCompetition} />
+          {hoverInfo.hex && (
+            <TooltipContent
+              hex={hoverInfo.hex}
+              hasCompetition={hasCompetition}
+              existingCount={brandCountByHex.get(hoverInfo.hex.hex_id)}
+            />
+          )}
+          {hoverInfo.brand && (
+            <BrandTooltipContent brand={hoverInfo.brand} />
+          )}
         </div>
       )}
 
@@ -261,11 +306,17 @@ export function OpportunityMap({
       )}
 
       {hasResults && (
-        <div className="absolute bottom-4 left-4 z-10 flex gap-3 rounded-lg border bg-card/90 px-3 py-2 text-xs backdrop-blur">
+        <div className="absolute bottom-4 left-4 z-10 flex flex-wrap gap-3 rounded-lg border bg-card/90 px-3 py-2 text-xs backdrop-blur">
           <span className="flex items-center gap-1.5">
             <span className="inline-block h-3 w-3 rounded-full bg-[rgb(30,50,255)]" />
-            Existing locations
+            Source locations
           </span>
+          {existingTargetLocations.length > 0 && (
+            <span className="flex items-center gap-1.5">
+              <span className="inline-block h-3 w-3 rounded-full border-2 border-[rgb(30,50,200)] bg-[rgb(100,140,255)]" />
+              Existing in target
+            </span>
+          )}
           <span className="flex items-center gap-1.5">
             <span className="inline-block h-3 w-3 rounded-full bg-[rgb(0,200,80)]" />
             Top opportunities
@@ -280,36 +331,91 @@ export function OpportunityMap({
   );
 }
 
+function BrandTooltipContent({ brand }: { brand: BrandLocationData }) {
+  const isSource = brand.is_source !== false;
+  return (
+    <div className="space-y-1">
+      <div className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+        {isSource ? "Source location" : "Existing in target"}
+      </div>
+      {brand.address && <div className="font-medium">{brand.address}</div>}
+      <div className="text-muted-foreground">{brand.hex_id}</div>
+      <div className="grid grid-cols-2 gap-x-3 gap-y-0.5 pt-1">
+        <span className="text-muted-foreground">Stores in cell</span>
+        <span className="font-medium">{brand.count}</span>
+      </div>
+    </div>
+  );
+}
+
 function TooltipContent({
   hex,
   hasCompetition,
+  existingCount,
 }: {
   hex: HexagonData;
   hasCompetition: boolean;
+  existingCount?: number;
 }) {
+  const isExistingCell = Boolean(hex.is_brand_cell);
+  const hasPoiCount = Number.isFinite(hex.poi_count);
+  const hasSimilarity = Number.isFinite(hex.similarity);
+  const opportunityScore =
+    typeof hex.opportunity_score === "number" ? hex.opportunity_score : null;
+  const hasOpportunity = opportunityScore !== null && Number.isFinite(opportunityScore);
+
   return (
     <div className="space-y-1">
       {hex.address && <div className="font-medium">{hex.address}</div>}
       <div className="text-muted-foreground">{hex.hex_id}</div>
       <div className="grid grid-cols-2 gap-x-3 gap-y-0.5 pt-1">
-        {hasCompetition && hex.opportunity_score != null && (
+        {isExistingCell ? (
           <>
-            <span className="text-muted-foreground">Opportunity</span>
-            <span className="font-medium">{(hex.opportunity_score * 100).toFixed(1)}%</span>
+            <span className="text-muted-foreground">Existing locations</span>
+            <span className="font-medium">{existingCount ?? 0}</span>
+            {hasPoiCount && (
+              <>
+                <span className="text-muted-foreground">POI Count</span>
+                <span className="font-medium">{hex.poi_count}</span>
+              </>
+            )}
           </>
-        )}
-        <span className="text-muted-foreground">Similarity</span>
-        <span className="font-medium">{(hex.similarity * 100).toFixed(1)}%</span>
-        <span className="text-muted-foreground">POI Count</span>
-        <span className="font-medium">{hex.poi_count}</span>
-        {hasCompetition && hex.competitor_count > 0 && (
+        ) : (
           <>
-            <span className="text-muted-foreground">Competitors</span>
-            <span className="font-medium">{hex.competitor_count}</span>
+            {hasCompetition && hasOpportunity && (
+              <>
+                <span className="text-muted-foreground">Opportunity</span>
+                <span className="font-medium">{(opportunityScore * 100).toFixed(1)}%</span>
+              </>
+            )}
+            {hasSimilarity && (
+              <>
+                <span className="text-muted-foreground">Similarity</span>
+                <span className="font-medium">{(hex.similarity * 100).toFixed(1)}%</span>
+              </>
+            )}
+            {hasPoiCount && (
+              <>
+                <span className="text-muted-foreground">POI Count</span>
+                <span className="font-medium">{hex.poi_count}</span>
+              </>
+            )}
+            {hasCompetition && (
+              <>
+                <span className="text-muted-foreground">Competitors</span>
+                <span className="font-medium">{hex.competitor_count}</span>
+              </>
+            )}
           </>
         )}
       </div>
-      {hex.cat_detail && (
+      {!isExistingCell && hex.top_competitors && (
+        <div className="pt-1 border-t text-muted-foreground">
+          <span className="font-medium text-foreground">Top Competitors: </span>
+          {hex.top_competitors}
+        </div>
+      )}
+      {!isExistingCell && hex.cat_detail && (
         <div
           className="pt-1 border-t text-muted-foreground"
           dangerouslySetInnerHTML={{ __html: hex.cat_detail }}

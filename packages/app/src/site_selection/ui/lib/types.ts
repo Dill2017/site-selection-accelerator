@@ -14,6 +14,27 @@ export interface BrandInput {
   mode: "brand_name" | "latlng" | "addresses" | "map_selection";
   value: string;
   geojson?: GeoJSON.FeatureCollection | null;
+  selected_poi_ids?: string[];
+}
+
+// -- Address Resolution ------------------------------------------------------
+
+export interface ResolvedPOI {
+  poi_id: string;
+  name: string;
+  brand: string;
+  category: string;
+}
+
+export interface ResolvedAddress {
+  address: string;
+  lat: number;
+  lon: number;
+  pois: ResolvedPOI[];
+}
+
+export interface ResolveAddressesResponse {
+  results: ResolvedAddress[];
 }
 
 export type DrawingMode = "navigate" | "point" | "polygon";
@@ -49,14 +70,18 @@ export interface BrandLocationData {
   lon: number;
   hex_id: string;
   count: number;
+  address: string;
+  is_source: boolean;
 }
 
 export interface AnalyzeResult {
   session_id: string;
   hexagons: HexagonData[];
   brand_locations: BrandLocationData[];
+  existing_target_locations: BrandLocationData[];
   city_polygon_geojson: Record<string, unknown> | null;
   has_competition: boolean;
+  analysis_mode: "brand" | "location";
   center_lat: number;
   center_lon: number;
 }
@@ -123,6 +148,13 @@ export interface CompetitorPOI {
   address: string;
 }
 
+export interface CellPOI {
+  name: string;
+  category: string;
+  brand: string;
+  address: string;
+}
+
 export interface HexagonDetail {
   h3_cell: number;
   hex_id: string;
@@ -133,6 +165,8 @@ export interface HexagonDetail {
   explanation_summary: string;
   competition: CompetitionInfo | null;
   competitor_pois: CompetitorPOI[];
+  cell_pois_title: string;
+  cell_pois: CellPOI[];
   fingerprint: FingerprintRow[];
 }
 

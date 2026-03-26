@@ -551,8 +551,8 @@ if __name__ == "__main__":
         else:
             from dotenv import load_dotenv
             load_dotenv()
-            catalog = os.getenv("GOLD_CATALOG", "dilshad_shawki")
-            schema = os.getenv("GOLD_SCHEMA", "geospatial")
+            catalog = os.getenv("GOLD_CATALOG", "")
+            schema = os.getenv("GOLD_SCHEMA", "")
             warehouse_id = os.getenv("DATABRICKS_WAREHOUSE_ID", "")
 
     result = main(catalog, schema, warehouse_id)

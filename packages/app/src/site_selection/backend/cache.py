@@ -23,8 +23,10 @@ class PipelineResult:
     address_lookup: dict[int, str]
     brand_locations: list[dict]
     city_h3_cells_df: pd.DataFrame
+    pois_df: pd.DataFrame
     competitor_pois: pd.DataFrame | None
     city_polygon_wkt: str | None
+    analysis_mode: str = "brand"
     brand_pois: pd.DataFrame | None = None
     created_at: float = field(default_factory=time.time)
 

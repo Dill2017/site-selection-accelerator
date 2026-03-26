@@ -46,6 +46,7 @@ function Index() {
       <OpportunityMap
         hexagons={analyzer.result?.hexagons}
         brandLocations={analyzer.result?.brand_locations}
+        existingTargetLocations={analyzer.result?.existing_target_locations}
         cityPolygonGeoJson={analyzer.result?.city_polygon_geojson}
         centerLat={analyzer.result?.center_lat}
         centerLon={analyzer.result?.center_lon}

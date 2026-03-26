@@ -3,8 +3,8 @@
 import logging
 import os
 
-_CATALOG = os.getenv("GOLD_CATALOG", "dilshad_shawki")
-_SCHEMA = os.getenv("GOLD_SCHEMA", "geospatial")
+_CATALOG = os.getenv("GOLD_CATALOG", "")
+_SCHEMA = os.getenv("GOLD_SCHEMA", "")
 
 GOLD_CITIES_TABLE = f"{_CATALOG}.{_SCHEMA}.gold_cities"
 GOLD_PLACES_TABLE = f"{_CATALOG}.{_SCHEMA}.gold_places"

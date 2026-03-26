@@ -30,6 +30,7 @@ export interface AnalyzeRequest {
     resolution?: number;
 }
 export interface AnalyzeResultOut {
+    analysis_mode?: string;
     brand_locations: BrandLocationData[];
     center_lat: number;
     center_lon: number;
@@ -60,6 +61,7 @@ export interface BrandInput {
     value?: string;
 }
 export interface BrandLocationData {
+    address?: string;
     count?: number;
     hex_id: string;
     lat: number;
@@ -92,6 +94,12 @@ export interface CellBreakdownRow {
     category: string;
     count: number;
     location: string;
+}
+export interface CellPOI {
+    address?: string;
+    brand?: string;
+    category: string;
+    name: string;
 }
 export interface CompetitionInfo {
     competition_score: number;
@@ -139,6 +147,8 @@ export interface HexagonData {
 }
 export interface HexagonDetailOut {
     address: string;
+    cell_pois?: CellPOI[];
+    cell_pois_title?: string;
     competition?: CompetitionInfo | null;
     competitor_pois?: CompetitorPOI[];
     explanation_summary?: string;

@@ -18,6 +18,7 @@ import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import {
+  AlertTriangle,
   ChevronLeft,
   ChevronRight,
   Search,
@@ -29,7 +30,7 @@ import {
   Check,
 } from "lucide-react";
 import { toast } from "sonner";
-import type { AppConfig, AnalyzeRequest, CategoryGroup } from "@/lib/types";
+import type { AppConfig, AnalyzeRequest, CategoryGroup, ResolvedAddress } from "@/lib/types";
 import { STEP_LABELS } from "@/lib/types";
 
 type BrandMode = "brand_name" | "latlng" | "addresses" | "map_selection";
@@ -81,6 +82,12 @@ export function ConfigSidebar({
   const [loadError, setLoadError] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
   const [savedAnalysisId, setSavedAnalysisId] = useState<string | null>(null);
+
+  const [resolvedAddresses, setResolvedAddresses] = useState<ResolvedAddress[]>([]);
+  const [selectedPoiIds, setSelectedPoiIds] = useState<Set<string>>(new Set());
+  const [isResolving, setIsResolving] = useState(false);
+  const [resolvedFor, setResolvedFor] = useState("");
+  const needsDisambiguation = brandMode === "addresses" && resolvedAddresses.some((a) => a.pois.length > 1);
 
   useEffect(() => {
     setSavedAnalysisId(null);
@@ -171,12 +178,54 @@ export function ConfigSidebar({
     selectedCats.size > 0 &&
     (isMapMode ? mapFeatureTotal > 0 : !!brandValue.trim());
 
+  const resolveAddresses = useCallback(async (text: string) => {
+    if (!text.trim()) return;
+    setIsResolving(true);
+    try {
+      const res = await fetch("/api/resolve-addresses", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ addresses: text, resolution }),
+      });
+      if (!res.ok) throw new Error(`Resolve failed: ${res.status}`);
+      const data = await res.json();
+      setResolvedAddresses(data.results);
+      setResolvedFor(text);
+      setSelectedPoiIds(new Set());
+    } catch {
+      // silent — user will see no disambiguation panel
+    } finally {
+      setIsResolving(false);
+    }
+  }, [resolution]);
+
+  useEffect(() => {
+    if (brandMode !== "addresses" || !brandValue.trim() || brandValue === resolvedFor) return;
+    const timer = setTimeout(() => resolveAddresses(brandValue), 1500);
+    return () => clearTimeout(timer);
+  }, [brandValue, brandMode, resolvedFor, resolveAddresses]);
+
+  const togglePoiId = useCallback((poiId: string) => {
+    setSelectedPoiIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(poiId)) next.delete(poiId);
+      else next.add(poiId);
+      return next;
+    });
+  }, []);
+
   const handleRun = useCallback(() => {
     if (!canRun) return;
 
     const brandInput = isMapMode
       ? { mode: "map_selection" as const, value: "", geojson: drawnFeatures }
-      : { mode: brandMode, value: brandValue };
+      : {
+          mode: brandMode,
+          value: brandValue,
+          ...(brandMode === "addresses" && selectedPoiIds.size > 0
+            ? { selected_poi_ids: Array.from(selectedPoiIds) }
+            : {}),
+        };
 
     onRun({
       country,
@@ -188,7 +237,7 @@ export function ConfigSidebar({
       beta,
       include_buildings: includeBuildings,
     });
-  }, [canRun, isMapMode, drawnFeatures, brandMode, brandValue, country, city, resolution, selectedCats, enableCompetition, beta, includeBuildings, onRun]);
+  }, [canRun, isMapMode, drawnFeatures, brandMode, brandValue, selectedPoiIds, country, city, resolution, selectedCats, enableCompetition, beta, includeBuildings, onRun]);
 
   const handleSave = useCallback(async () => {
     if (!sessionId) return;
@@ -349,21 +398,72 @@ export function ConfigSidebar({
               <Input
                 value={brandValue}
                 onChange={(e) => setBrandValue(e.target.value)}
-                placeholder="Starbucks, premium coffee chain..."
+                placeholder="Starbucks, Nike..."
                 className="h-8 text-sm"
               />
             ) : (
-              <Textarea
-                value={brandValue}
-                onChange={(e) => setBrandValue(e.target.value)}
-                placeholder={
-                  brandMode === "latlng"
-                    ? "51.5074, -0.1278\n51.5194, -0.1270"
-                    : "10 Downing Street, London\n221B Baker Street"
-                }
-                className="text-sm"
-                rows={3}
-              />
+              <div className="space-y-2">
+                <Textarea
+                  value={brandValue}
+                  onChange={(e) => {
+                    setBrandValue(e.target.value);
+                    if (e.target.value !== resolvedFor) {
+                      setResolvedAddresses([]);
+                      setSelectedPoiIds(new Set());
+                      setResolvedFor("");
+                    }
+                  }}
+                  placeholder={
+                    brandMode === "latlng"
+                      ? "51.5074, -0.1278\n51.5194, -0.1270"
+                      : "10 Downing Street, London\n221B Baker Street"
+                  }
+                  className="text-sm"
+                  rows={3}
+                />
+                {brandMode === "addresses" && isResolving && (
+                  <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
+                    <Loader2 className="h-3 w-3 animate-spin" />
+                    Resolving addresses...
+                  </div>
+                )}
+                {needsDisambiguation && (
+                  <div className="rounded border border-amber-400/60 bg-amber-50/50 dark:bg-amber-950/20 p-2 space-y-2 max-h-52 overflow-auto">
+                    <div className="flex items-center gap-1.5 text-[10px] font-medium text-amber-700 dark:text-amber-400">
+                      <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+                      Multiple POIs found — select which to use:
+                    </div>
+                    {resolvedAddresses.map((addr) =>
+                      addr.pois.length > 1 ? (
+                        <div key={addr.address} className="space-y-1">
+                          <p className="text-[10px] font-medium truncate" title={addr.address}>
+                            {addr.address}
+                          </p>
+                          {addr.pois.map((poi) => (
+                            <label
+                              key={poi.poi_id}
+                              className="flex items-start gap-1.5 cursor-pointer text-[10px] pl-2"
+                            >
+                              <Checkbox
+                                checked={selectedPoiIds.has(poi.poi_id)}
+                                onCheckedChange={() => togglePoiId(poi.poi_id)}
+                                className="mt-0.5 h-3 w-3"
+                              />
+                              <span className="leading-tight">
+                                <span className="font-medium">{poi.name}</span>
+                                {poi.brand && <span className="text-muted-foreground"> ({poi.brand})</span>}
+                                {poi.category && (
+                                  <span className="text-muted-foreground"> · {poi.category}</span>
+                                )}
+                              </span>
+                            </label>
+                          ))}
+                        </div>
+                      ) : null
+                    )}
+                  </div>
+                )}
+              </div>
             )}
           </div>
 

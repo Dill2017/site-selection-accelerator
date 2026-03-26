@@ -3,7 +3,7 @@
 -- table includes ALL categorised POIs with brand names, addresses, and
 -- coordinates — designed for Genie Space queries and competition analysis.
 -- H3 cell assignment happens at query time (resolution is user-selected).
-CREATE OR REPLACE TABLE dilshad_shawki.geospatial.gold_places_enriched AS
+CREATE OR REPLACE TABLE IDENTIFIER({{catalog}} || '.' || {{schema}} || '.gold_places_enriched') AS
 SELECT
     p.id                                                AS poi_id,
     p.names.primary                                     AS poi_primary_name,

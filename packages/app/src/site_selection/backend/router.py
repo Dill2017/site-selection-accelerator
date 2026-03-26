@@ -25,11 +25,16 @@ from .models import (
     CellBreakdownRow,
     CompetitionInfo,
     CompetitorPOI,
+    CellPOI,
     FingerprintRow,
     GenieDebugOut,
     HexagonData,
     HexagonDetailOut,
     PersistResultOut,
+    ResolveAddressesRequest,
+    ResolveAddressesResponse,
+    ResolvedAddress,
+    ResolvedPOI,
     VersionOut,
 )
 from . import cache
@@ -46,6 +51,17 @@ def _h3_int_to_hex(cell_id: int) -> str:
     if cell_id < 0:
         cell_id = cell_id + (1 << 64)
     return h3.int_to_str(cell_id)
+
+
+def _clean_text(value: object) -> str:
+    if value is None:
+        return ""
+    text = str(value).strip()
+    if not text:
+        return ""
+    if text.lower() in {"nan", "none", "null"}:
+        return ""
+    return text
 
 
 def _h3_center(cell_id: int) -> tuple[float, float]:
@@ -110,6 +126,66 @@ async def list_cities(country: str = Query(...)):
     return get_cities(country)
 
 
+# -- Address Resolution --------------------------------------------------------
+
+@router.post(
+    "/resolve-addresses",
+    response_model=ResolveAddressesResponse,
+    operation_id="resolveAddresses",
+)
+async def resolve_addresses(req: ResolveAddressesRequest):
+    """Geocode addresses and return candidate POIs at each location.
+
+    The frontend uses this to let the user disambiguate which POI(s)
+    they actually mean before running the full analysis.
+    """
+    from geopy.geocoders import Nominatim
+    from db import execute_query
+    import config as cfg
+
+    geocoder = Nominatim(user_agent="site-selection-accelerator")
+    results: list[ResolvedAddress] = []
+
+    for line in req.addresses.strip().splitlines():
+        addr = line.strip()
+        if not addr:
+            continue
+        geo_result = geocoder.geocode(addr, timeout=10)
+        if not geo_result:
+            continue
+
+        lat, lon = geo_result.latitude, geo_result.longitude
+        source_parts = [p.strip() for p in addr.split(",") if p.strip()]
+        source_line = source_parts[0] if source_parts else addr
+        escaped = source_line.replace("'", "''")
+
+        try:
+            poi_df = execute_query(f"""
+                SELECT p.poi_id, p.poi_primary_name, p.basic_category,
+                       p.brand_name_primary
+                FROM {cfg.GOLD_PLACES_ENRICHED} p
+                WHERE p.lon IS NOT NULL AND p.lat IS NOT NULL
+                  AND lower(trim(p.address_line)) = lower(trim('{escaped}'))
+            """)
+        except Exception:
+            poi_df = pd.DataFrame()
+
+        pois = []
+        for _, row in poi_df.iterrows():
+            name = str(row.get("poi_primary_name", "") or "")
+            brand = str(row.get("brand_name_primary", "") or "")
+            pois.append(ResolvedPOI(
+                poi_id=str(row["poi_id"]),
+                name=name or brand or "Unknown",
+                brand=brand,
+                category=str(row.get("basic_category", "") or ""),
+            ))
+
+        results.append(ResolvedAddress(address=addr, lat=lat, lon=lon, pois=pois))
+
+    return ResolveAddressesResponse(results=results)
+
+
 # -- Analyze (SSE) ------------------------------------------------------------
 
 @router.post("/analyze", operation_id="analyze")
@@ -152,6 +228,7 @@ async def analyze(req: AnalyzeRequest) -> StreamingResponse:
             # Resolve brand locations
             yield _sse({"type": "progress", "step": "resolving_brand", "pct": 10})
             brand_pois_df = None
+            analysis_mode = "brand"
             if req.brand_input.mode == "brand_name":
                 brand_locations, _, brand_pois_df = discover_brand_locations(
                     req.brand_input.value, req.resolution,
@@ -161,6 +238,7 @@ async def analyze(req: AnalyzeRequest) -> StreamingResponse:
                     yield _sse({"type": "error", "message": f"No locations found for '{req.brand_input.value}'"})
                     return
             elif req.brand_input.mode == "map_selection":
+                analysis_mode = "location"
                 if not req.brand_input.geojson:
                     yield _sse({"type": "error", "message": "No map features provided"})
                     return
@@ -171,16 +249,49 @@ async def analyze(req: AnalyzeRequest) -> StreamingResponse:
                 if req.enable_competition and req.beta > 0:
                     brand_pois_df = infer_location_categories(
                         brand_locations, req.resolution, req.country, req.city,
+                        restrict_to_target_city=False,
                     )
             else:
+                analysis_mode = "location"
                 brand_locations = _parse_locations(req.brand_input.value, req.brand_input.mode)
                 if not brand_locations:
                     yield _sse({"type": "error", "message": "No valid locations parsed"})
                     return
-                if req.enable_competition and req.beta > 0:
-                    brand_pois_df = infer_location_categories(
-                        brand_locations, req.resolution, req.country, req.city,
+                brand_pois_df = infer_location_categories(
+                    brand_locations, req.resolution, req.country, req.city,
+                    restrict_to_target_city=False,
+                )
+                if (
+                    req.brand_input.selected_poi_ids
+                    and brand_pois_df is not None
+                    and not brand_pois_df.empty
+                    and "poi_id" in brand_pois_df.columns
+                ):
+                    brand_pois_df = brand_pois_df[
+                        brand_pois_df["poi_id"].astype(str).isin(req.brand_input.selected_poi_ids)
+                    ]
+
+            # For address/latlng cross-region: find existing brand in target city
+            existing_target_locs: list[dict] = []
+            if analysis_mode == "location" and brand_pois_df is not None and not brand_pois_df.empty:
+                dominant_brand = _extract_dominant_brand(brand_pois_df)
+                if not dominant_brand:
+                    dominant_brand = _extract_brand_from_input(
+                        brand_pois_df, req.brand_input.value,
                     )
+                if dominant_brand:
+                    try:
+                        target_locs, _, _ = discover_brand_locations(
+                            dominant_brand, req.resolution,
+                            country=req.country, city=req.city,
+                        )
+                        existing_target_locs = target_locs or []
+                        log.info(
+                            "Cross-region: found %d existing '%s' locations in %s, %s",
+                            len(existing_target_locs), dominant_brand, req.city, req.country,
+                        )
+                    except Exception as e:
+                        log.warning("Cross-region brand lookup failed for '%s': %s", dominant_brand, e)
 
             # Tessellate
             yield _sse({"type": "progress", "step": "tessellating", "pct": 15})
@@ -282,7 +393,13 @@ async def analyze(req: AnalyzeRequest) -> StreamingResponse:
             else:
                 scored["similarity"] = np.zeros(len(scored))
 
-            # Competition
+            # Add cell activity before competition-adjusted scoring so
+            # opportunity can down-rank sparse, low-activity cells.
+            poi_totals = count_vectors.sum(axis=1).rename("poi_density")
+            scored = scored.merge(poi_totals, left_on="h3_cell", right_index=True, how="left")
+            scored["poi_density"] = scored["poi_density"].fillna(0).astype(int)
+
+            # Competition / Saturation
             competitor_pois = None
             if req.enable_competition and req.beta > 0 and brand_pois_df is not None and not brand_pois_df.empty:
                 yield _sse({"type": "progress", "step": "finding_competitors", "pct": 85})
@@ -294,10 +411,6 @@ async def analyze(req: AnalyzeRequest) -> StreamingResponse:
                 )
                 if competitor_pois is not None and not competitor_pois.empty:
                     scored = compute_opportunity_score(scored, competition, beta=req.beta)
-
-            poi_totals = count_vectors.sum(axis=1).rename("poi_density")
-            scored = scored.merge(poi_totals, left_on="h3_cell", right_index=True, how="left")
-            scored["poi_density"] = scored["poi_density"].fillna(0).astype(int)
 
             address_lookup = get_nearest_address_per_cell(pois_df)
 
@@ -311,15 +424,33 @@ async def analyze(req: AnalyzeRequest) -> StreamingResponse:
                 address_lookup=address_lookup,
                 brand_locations=brand_locations,
                 city_h3_cells_df=city_h3_cells_df,
+                pois_df=pois_df,
                 competitor_pois=competitor_pois,
                 city_polygon_wkt=city_polygon_wkt,
+                analysis_mode=analysis_mode,
                 brand_pois=brand_pois_df,
             )
             session_id = cache.save(pr)
 
+            # Mark existing target brand locations in scored so they are excluded
+            if existing_target_locs:
+                target_cell_ints = set()
+                for loc in existing_target_locs:
+                    hex_str = h3.latlng_to_cell(loc["lat"], loc["lon"], req.resolution)
+                    target_cell_ints.add(h3.str_to_int(hex_str))
+                scored.loc[scored["h3_cell"].isin(target_cell_ints), "is_brand_cell"] = True
+
             # Build hexagon data for the response
             hexagons = _build_hexagon_list(scored, address_lookup, count_vectors, brand_avg)
-            brand_locs = _build_brand_location_list(brand_locations, req.resolution)
+            brand_locs = _build_brand_location_list(brand_locations, req.resolution, address_lookup)
+
+            existing_target_brand_locs: list[BrandLocationData] = []
+            if existing_target_locs:
+                existing_target_brand_locs = _build_brand_location_list(
+                    existing_target_locs, req.resolution, address_lookup,
+                )
+                for loc in existing_target_brand_locs:
+                    loc.is_source = False
 
             city_polygon_geojson = None
             if city_polygon_wkt:
@@ -329,8 +460,10 @@ async def analyze(req: AnalyzeRequest) -> StreamingResponse:
                 session_id=session_id,
                 hexagons=hexagons,
                 brand_locations=brand_locs,
+                existing_target_locations=existing_target_brand_locs,
                 city_polygon_geojson=city_polygon_geojson,
                 has_competition="opportunity_score" in scored.columns,
+                analysis_mode=analysis_mode,
                 center_lat=float(city_h3_cells_df["center_lat"].mean()),
                 center_lon=float(city_h3_cells_df["center_lon"].mean()),
             )
@@ -358,6 +491,7 @@ async def get_results(session_id: str):
     brand_locs = _build_brand_location_list(
         pr.brand_locations,
         h3.get_resolution(_h3_int_to_hex(pr.scored["h3_cell"].iloc[0])),
+        pr.address_lookup,
     )
     city_polygon_geojson = _wkt_to_geojson(pr.city_polygon_wkt) if pr.city_polygon_wkt else None
 
@@ -367,6 +501,7 @@ async def get_results(session_id: str):
         brand_locations=brand_locs,
         city_polygon_geojson=city_polygon_geojson,
         has_competition="opportunity_score" in pr.scored.columns,
+        analysis_mode=getattr(pr, "analysis_mode", "brand"),
         center_lat=float(pr.city_h3_cells_df["center_lat"].mean()),
         center_lon=float(pr.city_h3_cells_df["center_lon"].mean()),
     )
@@ -484,11 +619,38 @@ async def get_hexagon_detail(session_id: str, hex_id: str):
         cell_comps = pr.competitor_pois[pr.competitor_pois["h3_hex"] == hex_id]
         for _, cr in cell_comps.iterrows():
             cell_competitor_pois.append(CompetitorPOI(
-                name=str(cr.get("poi_primary_name", "")),
-                category=str(cr.get("basic_category", cr.get("poi_primary_category", ""))),
-                brand=str(cr.get("brand_name_primary", "") or ""),
-                address=str(cr.get("address_line", "") or ""),
+                name=_clean_text(cr.get("poi_primary_name")),
+                category=_clean_text(cr.get("basic_category", cr.get("poi_primary_category", ""))),
+                brand=_clean_text(cr.get("brand_name_primary")),
+                address=_clean_text(cr.get("address_line")),
             ))
+
+    cell_pois: list[CellPOI] = []
+    cell_pois_title = ""
+    if pr.brand_pois is not None and not pr.brand_pois.empty:
+        bp = pr.brand_pois.copy()
+        if "h3_cell" not in bp.columns and {"lon", "lat"}.issubset(bp.columns):
+            resolution = h3.get_resolution(hex_id)
+            bp["h3_cell"] = bp.apply(
+                lambda r: h3.latlng_to_cell(float(r["lat"]), float(r["lon"]), resolution)
+                if pd.notna(r.get("lat")) and pd.notna(r.get("lon")) else "",
+                axis=1,
+            )
+
+        cell_matches = bp[bp["h3_cell"].astype(str) == hex_id]
+        if not cell_matches.empty:
+            cell_pois_title = "Existing locations in this cell"
+
+            for _, row in cell_matches.iterrows():
+                name = _clean_text(row.get("poi_primary_name"))
+                if not name:
+                    continue
+                cell_pois.append(CellPOI(
+                    name=name,
+                    category=_clean_text(row.get("basic_category", row.get("poi_primary_category", ""))),
+                    brand=_clean_text(row.get("brand_name_primary")),
+                    address=_clean_text(row.get("address_line")),
+                ))
 
     row_match = pr.scored[pr.scored["h3_cell"] == h3_cell]
     similarity = float(row_match.iloc[0]["similarity"]) if not row_match.empty else 0.0
@@ -511,6 +673,8 @@ async def get_hexagon_detail(session_id: str, hex_id: str):
         explanation_summary=summary,
         competition=comp_info,
         competitor_pois=cell_competitor_pois,
+        cell_pois_title=cell_pois_title,
+        cell_pois=cell_pois,
         fingerprint=fp_rows,
     )
 
@@ -717,6 +881,57 @@ async def get_assets():
 
 # -- Internal helpers ---------------------------------------------------------
 
+def _extract_dominant_brand(brand_pois_df: pd.DataFrame) -> str | None:
+    """Return the most common brand name from inferred POIs, or None.
+
+    For mixed-address results where many POIs share an address, we look
+    at poi_primary_name as a fallback when brand_name_primary is sparse.
+    Uses a relaxed threshold: the top brand just needs >= 2 occurrences
+    OR be the single most common name.
+    """
+    for col in ("brand_name_primary", "poi_primary_name"):
+        if col not in brand_pois_df.columns:
+            continue
+        names = brand_pois_df[col].dropna().astype(str).str.strip()
+        names = names[names.str.len() > 0]
+        if names.empty:
+            continue
+        counts = names.value_counts()
+        top_name = counts.index[0]
+        top_count = counts.iloc[0]
+        log.info(
+            "Brand extraction (%s): top='%s' count=%d total=%d",
+            col, top_name, top_count, len(brand_pois_df),
+        )
+        if top_count >= 2 or len(brand_pois_df) == 1:
+            return top_name
+    return None
+
+
+def _extract_brand_from_input(
+    brand_pois_df: pd.DataFrame, raw_input: str,
+) -> str | None:
+    """Try to match a brand/POI name from the resolved POIs against the user's
+    raw address text. E.g. if the user typed 'Starbucks, Avenida ...' and the
+    POI list includes a row with poi_primary_name='Starbucks ...', return it."""
+    if not raw_input:
+        return None
+    input_lower = raw_input.lower()
+    for col in ("brand_name_primary", "poi_primary_name"):
+        if col not in brand_pois_df.columns:
+            continue
+        for val in brand_pois_df[col].dropna().unique():
+            name = str(val).strip()
+            if not name:
+                continue
+            name_lower = name.lower()
+            first_word = name_lower.split()[0] if name_lower else ""
+            if first_word and len(first_word) >= 3 and first_word in input_lower:
+                log.info("Brand from input text: '%s' (matched '%s' in input)", name, first_word)
+                return name
+    return None
+
+
 def _sse(data: dict) -> str:
     return f"data: {json.dumps(data, default=str)}\n\n"
 
@@ -779,7 +994,7 @@ def _parse_locations(text: str, mode: str) -> list[dict]:
         elif geocoder is not None:
             result = geocoder.geocode(line, timeout=10)
             if result:
-                locs.append({"lat": result.latitude, "lon": result.longitude})
+                locs.append({"lat": result.latitude, "lon": result.longitude, "source": line})
     return locs
 
 
@@ -816,7 +1031,11 @@ def _build_hexagon_list(
     return hexagons
 
 
-def _build_brand_location_list(brand_locations: list[dict], resolution: int) -> list[BrandLocationData]:
+def _build_brand_location_list(
+    brand_locations: list[dict],
+    resolution: int,
+    address_lookup: dict[int, str] | None = None,
+) -> list[BrandLocationData]:
     cell_counts: dict[str, int] = {}
     for loc in brand_locations:
         hex_id = h3.latlng_to_cell(loc["lat"], loc["lon"], resolution)
@@ -825,7 +1044,11 @@ def _build_brand_location_list(brand_locations: list[dict], resolution: int) -> 
     result = []
     for hex_id, count in cell_counts.items():
         lat, lon = h3.cell_to_latlng(hex_id)
-        result.append(BrandLocationData(lat=lat, lon=lon, hex_id=hex_id, count=count))
+        addr = ""
+        if address_lookup:
+            cell_int = h3.str_to_int(hex_id)
+            addr = address_lookup.get(cell_int, "")
+        result.append(BrandLocationData(lat=lat, lon=lon, hex_id=hex_id, count=count, address=addr))
     return result
 
 

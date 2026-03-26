@@ -12,7 +12,21 @@ complete set of assets: the **ETL pipeline**, the **pretrained model**, the
 **gold tables**, the **analysis results in Delta**, and a **Genie Space** for
 continued natural-language exploration.
 
-**Use cases:** franchise expansion, competitive gap analysis, new market entry.
+**Use cases:** franchise expansion, competitive gap analysis, new market entry,
+cross-market transfer learning.
+
+### Core Capabilities
+
+- **Brand search** — enter a brand name (e.g. "Starbucks") and Genie resolves
+  all locations within the target city boundary using spatial SQL.
+- **Address / coordinate disambiguation** — enter addresses or lat/lon pairs;
+  the app geocodes them, resolves matching POIs, and presents a multi-select
+  checklist so you can pick exactly which anchor POIs to use before analysis.
+- **Cross-city / cross-country analysis** — source locations can be in a
+  different city or country to the target market. The app infers the category
+  fingerprint from the source locations and finds similar areas in the target.
+- **Competition analysis** — detects competitor brands in high-similarity cells
+  and applies a configurable penalty (β sensitivity) to surface true whitespace.
 
 ---
 
@@ -43,6 +57,7 @@ model.
 | Databricks workspace | With a SQL Warehouse (Serverless or Pro recommended) |
 | Databricks CLI | v0.239.0+ |
 | CARTO Overture Maps | `carto_overture_maps_places`, `carto_overture_maps_divisions`, `carto_overture_maps_buildings` available via Databricks Marketplace / Delta Sharing |
+| APX CLI | [Install from GitHub](https://github.com/databricks-solutions/apx) — required for building and running the full-stack app |
 | Python 3.11+ | With [uv](https://docs.astral.sh/uv/) installed |
 
 ### 1. Clone and install
@@ -142,10 +157,15 @@ Genie Space to the app's service principal.
 ### Running an Analysis
 
 1. **Select a target market** — choose country and city from the dropdowns.
-2. **Choose your brand** — enter a brand name (e.g. "Starbucks"), lat/lon
-   coordinates, street addresses, or draw locations on the map.
+2. **Choose your brand** — enter a brand name, lat/lon coordinates, street
+   addresses, or draw locations on the map.
+   - **Brand mode** — enter a brand name; Genie finds all matching locations.
+   - **Address mode** — enter addresses; the app geocodes them and shows a POI
+     checklist for disambiguation when multiple POIs share an address.
+   - **Coordinate mode** — paste lat/lon pairs directly.
+   - **Map drawing** — drop points or draw polygons on the map.
 3. **Tune parameters** — adjust H3 resolution, POI categories, building
-   features, and competition sensitivity.
+   features, and competition sensitivity (β).
 4. **Click "Find Opportunities"** — the pipeline runs with live progress,
    then the map fills with scored hexagons.
 5. **Explore** — hover hexagons for quick stats, click any hexagon for a
@@ -198,10 +218,11 @@ links to:
 │  ┌────────────────────────────────────────────────────────────────────┐   │
 │  │  FastAPI Backend                                                   │   │
 │  │                                                                    │   │
-│  │  POST /analyze          ─ SSE pipeline (tessellate, embed, score)  │   │
-│  │  GET  /results/{id}     ─ cached analysis for map rendering        │   │
+│  │  POST /analyze             ─ SSE pipeline (tessellate, embed, score)│   │
+│  │  POST /resolve-addresses  ─ geocode + POI lookup for disambiguation│   │
+│  │  GET  /results/{id}       ─ cached analysis for map rendering      │   │
 │  │  POST /results/{id}/persist ─ save analysis to Delta tables        │   │
-│  │  GET  /assets           ─ links to all workspace assets            │   │
+│  │  GET  /assets             ─ links to all workspace assets          │   │
 │  └────────────────────────────────────────────────────────────────────┘   │
 │                               │                                           │
 │  ┌────────────────────────────────────────────────────────────────────┐   │
@@ -307,7 +328,9 @@ The `geospatial_etl_job` runs these tasks in order:
 ### Analysis Pipeline (per run)
 
 1. **Brand resolution** — discover locations via Genie (brand name), geocoding
-   (addresses), or direct input (coordinates / map drawing)
+   with POI disambiguation (addresses), or direct input (coordinates / map
+   drawing). Source locations can be outside the target city/country for
+   cross-market analysis.
 2. **Tessellation** — fill the target city polygon with H3 cells
 3. **Feature assembly** — query POIs and buildings, merge into a unified feature
    table
@@ -315,8 +338,8 @@ The `geospatial_etl_job` runs these tasks in order:
    train from scratch as fallback)
 5. **Similarity scoring** — cosine similarity between brand profile and every
    city cell
-6. **Competition analysis** — find competitor POIs in high-similarity cells,
-   compute opportunity scores
+6. **Competition scoring** — find competitor POIs in high-similarity cells and
+   apply `similarity * (1 - β * competition_score)` to surface true whitespace.
 7. **Persist (optional)** — save all results to Delta when the user clicks
    Save Analysis
 

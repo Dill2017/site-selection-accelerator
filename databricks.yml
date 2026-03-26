@@ -10,16 +10,21 @@ sync:
 
 variables:
   catalog:
-    default: "dilshad_shawki"
+    default: "beatrice_liew"
   schema:
     default: "geospatial"
   warehouse_id:
     lookup:
-      warehouse: "Shared Endpoint"
+      warehouse: "Shared Unity Catalog Serverless"
+  node_type_id:
+    description: "Single-node cluster instance type (cloud-specific)"
+    default: "i3.xlarge"
 
 targets:
   dev:
     default: true
     mode: development
+    workspace:
+      profile: e2-demo-west
   prod:
     mode: production

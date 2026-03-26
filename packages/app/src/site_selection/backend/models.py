@@ -32,6 +32,32 @@ class BrandInput(BaseModel):
     mode: str = Field(description="'brand_name', 'latlng', 'addresses', or 'map_selection'")
     value: str = Field(default="", description="Brand query, lat/lon lines, or address lines")
     geojson: dict | None = Field(default=None, description="GeoJSON FeatureCollection for map_selection mode")
+    selected_poi_ids: list[str] | None = Field(
+        default=None,
+        description="POI IDs selected from address disambiguation step",
+    )
+
+
+# -- Address Resolution -------------------------------------------------------
+
+class ResolvedPOI(BaseModel):
+    poi_id: str
+    name: str
+    brand: str = ""
+    category: str = ""
+
+class ResolvedAddress(BaseModel):
+    address: str
+    lat: float
+    lon: float
+    pois: list[ResolvedPOI] = []
+
+class ResolveAddressesRequest(BaseModel):
+    addresses: str = Field(description="Newline-separated addresses")
+    resolution: int = 9
+
+class ResolveAddressesResponse(BaseModel):
+    results: list[ResolvedAddress] = []
 
 
 class AnalyzeRequest(BaseModel):
@@ -65,14 +91,18 @@ class BrandLocationData(BaseModel):
     lon: float
     hex_id: str
     count: int = 1
+    address: str = ""
+    is_source: bool = True
 
 
 class AnalyzeResultOut(BaseModel):
     session_id: str
     hexagons: list[HexagonData]
     brand_locations: list[BrandLocationData]
+    existing_target_locations: list[BrandLocationData] = []
     city_polygon_geojson: dict | None = None
     has_competition: bool = False
+    analysis_mode: str = "brand"
     center_lat: float
     center_lon: float
 
@@ -125,6 +155,13 @@ class CompetitorPOI(BaseModel):
     address: str = ""
 
 
+class CellPOI(BaseModel):
+    name: str
+    category: str
+    brand: str = ""
+    address: str = ""
+
+
 class HexagonDetailOut(BaseModel):
     h3_cell: int
     hex_id: str
@@ -135,6 +172,8 @@ class HexagonDetailOut(BaseModel):
     explanation_summary: str = ""
     competition: CompetitionInfo | None = None
     competitor_pois: list[CompetitorPOI] = []
+    cell_pois_title: str = ""
+    cell_pois: list[CellPOI] = []
     fingerprint: list[FingerprintRow]
 
 
