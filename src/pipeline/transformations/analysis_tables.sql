@@ -2,7 +2,7 @@
 -- These are append-only tables keyed by analysis_id so that multiple
 -- analyses (different brands, cities, parameters) coexist.
 
-CREATE TABLE IF NOT EXISTS dilshad_shawki.geospatial.analyses (
+CREATE TABLE IF NOT EXISTS IDENTIFIER({{catalog}} || '.' || {{schema}} || '.analyses') (
     analysis_id          STRING    NOT NULL,
     session_id           STRING    NOT NULL,
     brand_input_mode     STRING,
@@ -21,7 +21,7 @@ CREATE TABLE IF NOT EXISTS dilshad_shawki.geospatial.analyses (
     created_by           STRING
 ) USING DELTA;
 
-CREATE TABLE IF NOT EXISTS dilshad_shawki.geospatial.analysis_brand_profiles (
+CREATE TABLE IF NOT EXISTS IDENTIFIER({{catalog}} || '.' || {{schema}} || '.analysis_brand_profiles') (
     analysis_id      STRING NOT NULL,
     category         STRING,
     avg_count        DOUBLE,
@@ -30,7 +30,7 @@ CREATE TABLE IF NOT EXISTS dilshad_shawki.geospatial.analysis_brand_profiles (
     group_name       STRING
 ) USING DELTA;
 
-CREATE TABLE IF NOT EXISTS dilshad_shawki.geospatial.analysis_hexagons (
+CREATE TABLE IF NOT EXISTS IDENTIFIER({{catalog}} || '.' || {{schema}} || '.analysis_hexagons') (
     analysis_id       STRING  NOT NULL,
     h3_cell           BIGINT,
     hex_id            STRING,
@@ -45,7 +45,7 @@ CREATE TABLE IF NOT EXISTS dilshad_shawki.geospatial.analysis_hexagons (
     top_competitors   STRING
 ) USING DELTA;
 
-CREATE TABLE IF NOT EXISTS dilshad_shawki.geospatial.analysis_fingerprints (
+CREATE TABLE IF NOT EXISTS IDENTIFIER({{catalog}} || '.' || {{schema}} || '.analysis_fingerprints') (
     analysis_id          STRING NOT NULL,
     hex_id               STRING,
     category             STRING,
@@ -58,7 +58,7 @@ CREATE TABLE IF NOT EXISTS dilshad_shawki.geospatial.analysis_fingerprints (
     explanation_summary  STRING
 ) USING DELTA;
 
-CREATE TABLE IF NOT EXISTS dilshad_shawki.geospatial.analysis_competitors (
+CREATE TABLE IF NOT EXISTS IDENTIFIER({{catalog}} || '.' || {{schema}} || '.analysis_competitors') (
     analysis_id STRING NOT NULL,
     hex_id      STRING,
     poi_name    STRING,

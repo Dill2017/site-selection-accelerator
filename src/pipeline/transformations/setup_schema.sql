@@ -1,1 +1,1 @@
-CREATE SCHEMA IF NOT EXISTS dilshad_shawki.geospatial
+CREATE SCHEMA IF NOT EXISTS IDENTIFIER({{catalog}} || '.' || {{schema}})

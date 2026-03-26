@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   Sheet,
   SheetContent,
@@ -42,6 +42,19 @@ export function FingerprintPanel({
   const [metric, setMetric] = useState<"counts" | "pct">("pct");
 
   const [error, setError] = useState<string | null>(null);
+
+  const cellCompetitorBrandCounts = useMemo(() => {
+    if (!detail?.competitor_pois?.length) return [];
+    const counts: Record<string, number> = {};
+    for (const poi of detail.competitor_pois) {
+      const label = competitorLabel(poi);
+      if (!label) continue;
+      counts[label] = (counts[label] || 0) + 1;
+    }
+    return Object.entries(counts)
+      .map(([name, count]) => ({ name, count }))
+      .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
+  }, [detail]);
 
   useEffect(() => {
     if (!hex || !sessionId) {
@@ -115,90 +128,12 @@ export function FingerprintPanel({
               )}
             </div>
 
-            {/* Competition detail */}
-            {detail.competition && detail.competition.top_competitors && (
-              <div className="text-xs text-muted-foreground">
-                <span className="font-medium">Nearby competitors:</span>{" "}
-                {detail.competition.top_competitors}
-              </div>
-            )}
-
-            {/* Competitor POIs table */}
-            {detail.competitor_pois && detail.competitor_pois.length > 0 && (
-              <details className="group">
-                <summary className="flex cursor-pointer items-center justify-between text-xs font-medium hover:underline list-none">
-                  <span>Competitor POIs in this cell ({detail.competitor_pois.length})</span>
-                  <ChevronDown className="h-3.5 w-3.5 transition-transform group-open:rotate-180" />
-                </summary>
-                <div className="mt-1 max-h-48 overflow-auto rounded border">
-                  <table className="w-full text-xs">
-                    <thead className="bg-muted/50 sticky top-0">
-                      <tr>
-                        <th className="px-2 py-1 text-left font-medium">Name</th>
-                        <th className="px-2 py-1 text-left font-medium">Category</th>
-                        <th className="px-2 py-1 text-left font-medium">Brand</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {detail.competitor_pois.map((poi, i) => (
-                        <tr key={i} className="border-t">
-                          <td className="px-2 py-1">{poi.name}</td>
-                          <td className="px-2 py-1 text-muted-foreground">{poi.category}</td>
-                          <td className="px-2 py-1 text-muted-foreground">{poi.brand || "—"}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </details>
-            )}
-
-            {/* Explanation summary */}
+            {/* Explanation summary (above fingerprint) */}
             {detail.explanation_summary && (
               <div className="rounded-md border bg-muted/50 px-3 py-2 text-xs">
                 {detail.explanation_summary}
               </div>
             )}
-
-            <Separator />
-
-            {/* Genie Debug */}
-            {genieDebug && genieDebug.brand_pois.length > 0 && (
-              <details className="group">
-                <summary className="flex cursor-pointer items-center justify-between text-xs font-medium hover:underline list-none">
-                  <span>
-                    Genie Results ({genieDebug.total_brand_pois} brand POIs, {genieDebug.competitor_pois_total} competitors)
-                  </span>
-                  <ChevronDown className="h-3.5 w-3.5 transition-transform group-open:rotate-180" />
-                </summary>
-                <div className="mt-1 max-h-48 overflow-auto rounded border">
-                  <table className="w-full text-xs">
-                    <thead className="bg-muted/50 sticky top-0">
-                      <tr>
-                        <th className="px-2 py-1 text-left font-medium">Name</th>
-                        <th className="px-2 py-1 text-left font-medium">Category</th>
-                        <th className="px-2 py-1 text-left font-medium">Brand</th>
-                        <th className="px-2 py-1 text-left font-medium">H3</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {genieDebug.brand_pois.map((poi, i) => (
-                        <tr key={i} className="border-t">
-                          <td className="px-2 py-1">{poi.name}</td>
-                          <td className="px-2 py-1 text-muted-foreground">{poi.category}</td>
-                          <td className="px-2 py-1 text-muted-foreground">{poi.brand || "—"}</td>
-                          <td className="px-2 py-1 text-muted-foreground font-mono text-[10px]">
-                            {poi.h3_cell ? poi.h3_cell.slice(-6) : "—"}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </details>
-            )}
-
-            <Separator />
 
             {/* Chart controls */}
             <div className="flex items-center justify-between">
@@ -230,6 +165,116 @@ export function FingerprintPanel({
               chartStyle={chartStyle}
               metric={metric}
             />
+
+            {/* Competition detail (kept below fingerprint) */}
+            {detail.competition && detail.competition.top_competitors && (
+              <div className="text-xs text-muted-foreground">
+                <span className="font-medium">Nearby competitors:</span>{" "}
+                {detail.competition.top_competitors}
+              </div>
+            )}
+
+            {/* Competitor brands */}
+            {cellCompetitorBrandCounts.length > 0 && (
+              <details className="group" open>
+                <summary className="flex cursor-pointer items-center justify-between text-xs font-medium hover:underline list-none">
+                  <span>Competitor Brands</span>
+                  <ChevronDown className="h-3.5 w-3.5 transition-transform group-open:rotate-180" />
+                </summary>
+                <div className="mt-1 max-h-48 overflow-auto rounded border">
+                  <table className="w-full text-xs">
+                    <thead className="bg-muted/50 sticky top-0">
+                      <tr>
+                        <th className="px-2 py-1 text-left font-medium">#</th>
+                        <th className="px-2 py-1 text-left font-medium">Brand / Place</th>
+                        <th className="px-2 py-1 text-right font-medium">Count</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {cellCompetitorBrandCounts.map((row, i) => (
+                        <tr key={row.name} className="border-t">
+                          <td className="px-2 py-1 text-muted-foreground">{i + 1}</td>
+                          <td className="px-2 py-1">{row.name}</td>
+                          <td className="px-2 py-1 text-right font-medium">{row.count}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </details>
+            )}
+
+            {/* Cell POI breakdown (near bottom) */}
+            {detail.cell_pois && detail.cell_pois.length > 0 && (
+              <details className="group" open>
+                <summary className="flex cursor-pointer items-center justify-between text-xs font-medium hover:underline list-none">
+                  <span>{detail.cell_pois_title || "Cell POI Breakdown"} ({detail.cell_pois.length})</span>
+                  <ChevronDown className="h-3.5 w-3.5 transition-transform group-open:rotate-180" />
+                </summary>
+                <div className="mt-1 max-h-56 overflow-auto rounded border">
+                  <table className="w-full text-xs">
+                    <thead className="bg-muted/50 sticky top-0">
+                      <tr>
+                        <th className="px-2 py-1 text-left font-medium">POI Name</th>
+                        <th className="px-2 py-1 text-left font-medium">Brand</th>
+                        <th className="px-2 py-1 text-left font-medium">Address</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {detail.cell_pois.map((poi, i) => (
+                        <tr key={`${poi.name}-${i}`} className="border-t">
+                          <td className="px-2 py-1">{cleanText(poi.name) || "—"}</td>
+                          <td className="px-2 py-1 text-muted-foreground">
+                            {cleanText(poi.brand) || cleanText(poi.name) || "—"}
+                          </td>
+                          <td className="px-2 py-1 text-muted-foreground">
+                            {cleanText(poi.address) || "—"}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </details>
+            )}
+
+            <Separator />
+
+            {/* Genie Debug (last) */}
+            {genieDebug && genieDebug.brand_pois.length > 0 && (
+              <details className="group">
+                <summary className="flex cursor-pointer items-center justify-between text-xs font-medium hover:underline list-none">
+                  <span>
+                    Genie Results ({genieDebug.total_brand_pois} brand POIs, {genieDebug.competitor_pois_total} competitors)
+                  </span>
+                  <ChevronDown className="h-3.5 w-3.5 transition-transform group-open:rotate-180" />
+                </summary>
+                <div className="mt-1 max-h-48 overflow-auto rounded border">
+                  <table className="w-full text-xs">
+                    <thead className="bg-muted/50 sticky top-0">
+                      <tr>
+                        <th className="px-2 py-1 text-left font-medium">Name</th>
+                        <th className="px-2 py-1 text-left font-medium">Category</th>
+                        <th className="px-2 py-1 text-left font-medium">Brand</th>
+                        <th className="px-2 py-1 text-left font-medium">H3</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {genieDebug.brand_pois.map((poi, i) => (
+                        <tr key={i} className="border-t">
+                          <td className="px-2 py-1">{poi.name}</td>
+                          <td className="px-2 py-1 text-muted-foreground">{poi.category}</td>
+                          <td className="px-2 py-1 text-muted-foreground">{cleanText(poi.brand) || cleanText(poi.name)}</td>
+                          <td className="px-2 py-1 text-muted-foreground font-mono text-[10px]">
+                            {poi.h3_cell ? poi.h3_cell.slice(-6) : "—"}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </details>
+            )}
           </div>
         ) : (
           <p className="text-sm text-muted-foreground mt-4">
@@ -325,4 +370,16 @@ function FingerprintChart({
       </BarChart>
     </ResponsiveContainer>
   );
+}
+
+function cleanText(value: string | null | undefined): string {
+  const text = (value ?? "").trim();
+  if (!text) return "";
+  const lower = text.toLowerCase();
+  if (lower === "nan" || lower === "null" || lower === "none") return "";
+  return text;
+}
+
+function competitorLabel(poi: { name: string; brand: string }): string {
+  return cleanText(poi.brand) || cleanText(poi.name);
 }

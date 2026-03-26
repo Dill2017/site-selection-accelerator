@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import h3
-import numpy as np
 import pandas as pd
 from sklearn.metrics.pairwise import cosine_similarity
 
@@ -85,9 +84,6 @@ def compute_opportunity_score(
 
     opportunity_score = similarity * (1 - beta * competition_score)
 
-    competition_score is normalised by the max competitor count found in
-    any cell with competition data (not across all cells).
-
     Parameters
     ----------
     scored : DataFrame from compute_similarity (h3_cell, similarity, is_brand_cell)
@@ -109,7 +105,6 @@ def compute_opportunity_score(
     cap = max(max_in_any_cell, 1)
 
     merged["competition_score"] = merged["competitor_count"] / cap
-
     merged["opportunity_score"] = merged["similarity"] * (
         1 - beta * merged["competition_score"]
     )

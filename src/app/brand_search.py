@@ -18,6 +18,9 @@ import datetime
 import json
 import logging
 import os
+import re
+import time
+import unicodedata
 
 import h3
 import pandas as pd
@@ -27,6 +30,26 @@ from databricks.sdk.service.serving import ChatMessage, ChatMessageRole
 import config as cfg
 
 log = logging.getLogger(__name__)
+
+
+def _clean_name(value: object) -> str:
+    """Return a normalized name string, treating null-like values as empty."""
+    if value is None:
+        return ""
+    text = str(value).strip()
+    if not text:
+        return ""
+    if text.lower() in {"nan", "none", "null"}:
+        return ""
+    return text
+
+
+def _primary_shop_name(row: pd.Series) -> str:
+    """Use brand_name_primary when present, otherwise fall back to poi_primary_name."""
+    brand = _clean_name(row.get("brand_name_primary"))
+    if brand:
+        return brand
+    return _clean_name(row.get("poi_primary_name"))
 
 
 def h3_int_to_hex(val: int) -> str:
@@ -55,6 +78,17 @@ def _get_workspace_client() -> WorkspaceClient:
         _ws_client = WorkspaceClient(profile="DEFAULT")
 
     return _ws_client
+
+
+def _sql_escape(value: str) -> str:
+    return value.replace("'", "''")
+
+
+def _normalize_for_match(value: str) -> str:
+    text = unicodedata.normalize("NFKD", value)
+    text = "".join(ch for ch in text if not unicodedata.combining(ch))
+    text = text.lower()
+    return re.sub(r"[^a-z0-9]", "", text)
 
 
 # ── Genie Space resolution ───────────────────────────────────────────────────
@@ -147,11 +181,9 @@ def discover_brand_locations(
     country: str,
     city: str,
 ) -> tuple[list[dict], list[int], pd.DataFrame]:
-    """Find a brand's existing locations via Genie Space.
+    """Find brand POI locations via Genie Space.
 
-    Genie uses h3_polyfillash3 to convert the city polygon into H3
-    cells and filters POIs by cell membership for fast spatial queries.
-    H3 cells are returned as hex strings.
+    The query is sent directly to Genie as a brand/ILIKE search.
 
     Returns
     -------
@@ -159,17 +191,28 @@ def discover_brand_locations(
     brand_cells : list of H3 cell IDs (BIGINT)
     brand_pois : DataFrame of matched POIs
     """
-    question = (
-        f"Find all {query} locations within the city boundary of {city}, "
-        f"{country}. Use h3_polyfillash3 on the gold_cities polygon to get "
-        f"the H3 cells covering the city, then filter gold_places_enriched "
-        f"where h3_longlatash3(lon, lat, {resolution}) is in that set. "
-        f"Return poi_id, poi_primary_name, basic_category, "
-        f"brand_name_primary, lon, lat, "
+    _RETURN_COLS = (
+        "poi_id, poi_primary_name, basic_category, "
+        "brand_name_primary, lon, lat, "
         f"h3_h3tostring(h3_longlatash3(lon, lat, {resolution})) as h3_cell"
     )
+    _SPATIAL_HINT = (
+        "Use h3_polyfillash3 on the gold_cities polygon to get "
+        "the H3 cells covering the city, then filter gold_places_enriched "
+        f"where h3_longlatash3(lon, lat, {resolution}) is in that set. "
+        f"Return {_RETURN_COLS}"
+    )
 
+    question = (
+        f"Find all {query} locations within the city boundary "
+        f"of {city}, {country}. Filter where brand_name_primary ILIKE "
+        f"'%{query}%' OR poi_primary_name ILIKE '%{query}%'. "
+        f"{_SPATIAL_HINT}"
+    )
+    log.info("Brand query '%s'", query)
+    t0 = time.perf_counter()
     brand_pois = _ask_genie(question)
+    log.info("Brand Genie lookup latency: %.2fs", time.perf_counter() - t0)
 
     if brand_pois.empty:
         return [], [], brand_pois
@@ -202,44 +245,99 @@ def infer_location_categories(
     resolution: int,
     country: str,
     city: str,
+    restrict_to_target_city: bool = True,
 ) -> pd.DataFrame:
-    """Reverse-lookup POIs at the given coordinates to infer brand categories.
+    """Infer source categories from nearest POI(s) to each input point.
 
-    Queries gold_places_enriched for POIs in the same H3 cells as the
-    input locations, filtered by the city polygon.
+    For each user-provided coordinate we pick the nearest POI row
+    (exact row if coordinates match exactly, otherwise closest by
+    lon/lat distance). This avoids using all POIs in the whole H3 cell,
+    which can be noisy for malls/commercial hotspots.
     """
     from db import execute_query
 
-    h3_hexes = set()
-    for loc in locations:
-        hex_str = h3.latlng_to_cell(loc["lat"], loc["lon"], resolution)
-        h3_hexes.add(hex_str)
-
-    if not h3_hexes:
+    if not locations:
         return pd.DataFrame()
 
-    h3_list = ", ".join(f"'{h}'" for h in h3_hexes)
+    # Keep arguments for compatibility; in nearest-point mode we intentionally
+    # do not constrain to target city/country for source category inference.
+    _ = (country, city, restrict_to_target_city)
 
-    query = f"""
-    WITH city_h3 AS (
-        SELECT explode(h3_polyfillash3(
-            geom_wkt, {resolution}
-        )) AS h3_cell
-        FROM {cfg.GOLD_CITIES_TABLE}
-        WHERE country = '{country}' AND city_name = '{city}'
-    )
-    SELECT p.poi_id, p.poi_primary_name, p.basic_category,
-           p.poi_primary_category, p.brand_name_primary,
-           p.lon, p.lat
-    FROM {cfg.GOLD_PLACES_ENRICHED} p
-    WHERE h3_longlatash3(p.lon, p.lat, {resolution})
-          IN (SELECT h3_cell FROM city_h3)
-      AND h3_h3tostring(h3_longlatash3(p.lon, p.lat, {resolution})) IN ({h3_list})
-      AND p.lon IS NOT NULL AND p.lat IS NOT NULL
-    """
+    rows: list[pd.DataFrame] = []
+    for loc in locations:
+        lat = float(loc["lat"])
+        lon = float(loc["lon"])
+        source_addr = str(loc.get("source", "")).strip()
+        # For geocoded free-text addresses, users often pass
+        # "address_line, locality[, ...]". The table stores just address_line.
+        # Match on parsed street line first to avoid false nearest-point fallback.
+        source_parts = [p.strip() for p in source_addr.split(",") if p.strip()]
+        source_line = source_parts[0] if source_parts else source_addr
+
+        # Address mode: anchor to rows that actually share the address text.
+        if source_addr:
+            escaped = _sql_escape(source_line)
+            norm_source = _normalize_for_match(source_line)
+            addr_query = f"""
+            SELECT p.poi_id, p.poi_primary_name, p.basic_category,
+                   p.poi_primary_category, p.brand_name_primary,
+                   p.address_line, p.lon, p.lat,
+                   h3_h3tostring(h3_longlatash3(p.lon, p.lat, {resolution})) AS h3_cell
+            FROM {cfg.GOLD_PLACES_ENRICHED} p
+            WHERE p.lon IS NOT NULL AND p.lat IS NOT NULL
+              AND lower(trim(p.address_line)) = lower(trim('{escaped}'))
+            """
+            try:
+                addr_df = execute_query(addr_query)
+                if addr_df.empty and norm_source:
+                    # Fallback for formatting/diacritic differences in address text.
+                    addr_query_fuzzy = f"""
+                    SELECT p.poi_id, p.poi_primary_name, p.basic_category,
+                           p.poi_primary_category, p.brand_name_primary,
+                           p.address_line, p.lon, p.lat,
+                           h3_h3tostring(h3_longlatash3(p.lon, p.lat, {resolution})) AS h3_cell
+                    FROM {cfg.GOLD_PLACES_ENRICHED} p
+                    WHERE p.lon IS NOT NULL AND p.lat IS NOT NULL
+                      AND regexp_replace(
+                            translate(lower(coalesce(p.address_line, '')),
+                                      'áàäâãéèëêíìïîóòöôõúùüûñç',
+                                      'aaaaaeeeeiiiiooooouuuunc'),
+                            '[^a-z0-9]', ''
+                          ) LIKE '%{_sql_escape(norm_source)}%'
+                    """
+                    addr_df = execute_query(addr_query_fuzzy)
+                if not addr_df.empty:
+                    # Address mode should keep all matched rows for that address.
+                    # Only use nearest-point fallback when address matching fails.
+                    rows.append(addr_df)
+                    continue
+            except Exception as e:
+                log.warning("Address-based source lookup failed for '%s': %s", source_addr, e)
+
+        query = f"""
+        SELECT p.poi_id, p.poi_primary_name, p.basic_category,
+               p.poi_primary_category, p.brand_name_primary,
+               p.lon, p.lat,
+               h3_h3tostring(h3_longlatash3(p.lon, p.lat, {resolution})) AS h3_cell
+        FROM {cfg.GOLD_PLACES_ENRICHED} p
+        WHERE p.lon IS NOT NULL AND p.lat IS NOT NULL
+        ORDER BY POWER(p.lon - ({lon}), 2) + POWER(p.lat - ({lat}), 2)
+        LIMIT 1
+        """
+        try:
+            df = execute_query(query)
+            if not df.empty:
+                rows.append(df)
+        except Exception as e:
+            log.error("Nearest POI lookup failed for (%s,%s): %s", lat, lon, e)
 
     try:
-        return execute_query(query)
+        if not rows:
+            return pd.DataFrame()
+        merged = pd.concat(rows, ignore_index=True)
+        if "poi_id" in merged.columns:
+            merged = merged.drop_duplicates(subset=["poi_id"])
+        return merged
     except Exception as e:
         log.error("Location category inference failed: %s", e)
         return pd.DataFrame()
@@ -255,23 +353,40 @@ def _filter_categories(
 ) -> set[str]:
     """Two-stage filter: frequency first, then LLM with industry context."""
     counts: dict[str, int] = {}
-    for col in ("basic_category", "poi_primary_category"):
-        if col in brand_pois.columns:
-            for cat in brand_pois[col].dropna():
-                counts[cat] = counts.get(cat, 0) + 1
+    for _, row in brand_pois.iterrows():
+        # Count one canonical category per POI row to avoid double-counting
+        # when basic_category and poi_primary_category are identical.
+        cat = _clean_name(row.get("basic_category")) or _clean_name(
+            row.get("poi_primary_category")
+        )
+        if cat:
+            counts[cat] = counts.get(cat, 0) + 1
 
     if not counts:
         return set()
 
     total = len(brand_pois)
-    threshold = max(total * min_pct, 1)
+    # For small/mixed anchor sets (common with lat/lon + address inputs),
+    # avoid treating every single one-off category as a competitor category.
+    threshold = max(total * min_pct, 2)
     above_threshold = {cat for cat, n in counts.items() if n >= threshold}
+
+    # If nothing passes threshold, keep only the most frequent category(ies),
+    # which approximates "average composition by dominant category".
+    if not above_threshold:
+        max_n = max(counts.values())
+        return {cat for cat, n in counts.items() if n == max_n}
 
     if len(above_threshold) <= 1:
         return above_threshold
 
     sorted_cats = sorted(counts.items(), key=lambda x: -x[1])
     dominant = [cat for cat, _ in sorted_cats[:3]]
+
+    # Address/lat-lon/map-selection modes have no explicit brand name, so
+    # avoid brand-vertical LLM filtering and keep deterministic top categories.
+    if not brand_query.strip():
+        return set(dominant)
 
     return _llm_industry_filter(brand_query, dominant, above_threshold)
 
@@ -368,10 +483,10 @@ def find_competitors_in_similar_cells(
 
     brand_query_lower = brand_query.lower().strip() if brand_query else ""
     exact_brand_names: set[str] = set()
-    if "brand_name_primary" in brand_pois.columns:
-        exact_brand_names = set(
-            brand_pois["brand_name_primary"].dropna().str.lower().unique()
-        )
+    for _, brand_row in brand_pois.iterrows():
+        name = _primary_shop_name(brand_row).lower()
+        if name:
+            exact_brand_names.add(name)
 
     is_brand = scored.get("is_brand_cell", False)
     candidate_cells = scored[
@@ -411,16 +526,18 @@ def find_competitors_in_similar_cells(
     if competitors.empty:
         return empty_agg, empty_pois
 
+    competitors["shop_name"] = competitors.apply(_primary_shop_name, axis=1)
+
     def _is_brand(row):
-        name = str(row.get("poi_primary_name", "")).lower()
-        brand = str(row.get("brand_name_primary", "")).lower()
-        if brand and brand in exact_brand_names:
+        name = _clean_name(row.get("shop_name")).lower()
+        if name and name in exact_brand_names:
             return True
         if brand_query_lower and brand_query_lower in name:
             return True
         return False
 
     competitors = competitors[~competitors.apply(_is_brand, axis=1)].copy()
+    competitors = competitors[competitors["shop_name"].str.len() > 0]
 
     if competitors.empty:
         return empty_agg, empty_pois
@@ -434,7 +551,7 @@ def find_competitors_in_similar_cells(
         [competitors.reset_index(drop=True), coords], axis=1
     )
 
-    global_popularity = competitors["poi_primary_name"].dropna().value_counts()
+    global_popularity = competitors["shop_name"].dropna().value_counts()
 
     def _top3_with_counts(names: pd.Series) -> str:
         cell_counts = names.dropna().value_counts()
@@ -454,7 +571,7 @@ def find_competitors_in_similar_cells(
         competitors.groupby("h3_hex")
         .agg(
             competitor_count=("id", "size"),
-            top_competitors=("poi_primary_name", _top3_with_counts),
+            top_competitors=("shop_name", _top3_with_counts),
         )
         .reset_index()
     )

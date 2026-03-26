@@ -4,7 +4,7 @@ env:
   - name: DATABRICKS_WAREHOUSE_ID
     valueFrom: sql-warehouse
   - name: GOLD_CATALOG
-    value: "dilshad_shawki"
+    value: "beatrice_liew"
   - name: GOLD_SCHEMA
     value: "geospatial"
   - name: GENIE_SPACE_ID

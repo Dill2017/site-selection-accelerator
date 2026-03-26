@@ -2,7 +2,7 @@
 -- Joins divisions + division_areas so the app never touches raw WKB geometry.
 -- Polygon resolution: locality area first, then ST_Union of all same-name
 -- region/county/neighborhood/macrohood areas (covers city-states and metro areas).
-CREATE OR REPLACE TABLE dilshad_shawki.geospatial.gold_cities AS
+CREATE OR REPLACE TABLE IDENTIFIER({{catalog}} || '.' || {{schema}} || '.gold_cities') AS
 WITH localities AS (
     SELECT
         d.id,

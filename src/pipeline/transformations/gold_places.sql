@@ -1,6 +1,6 @@
 -- Pre-processed POI table: coordinates extracted, category flattened,
 -- address denested. Filtered to the categories used by the accelerator.
-CREATE OR REPLACE TABLE dilshad_shawki.geospatial.gold_places AS
+CREATE OR REPLACE TABLE IDENTIFIER({{catalog}} || '.' || {{schema}} || '.gold_places') AS
 SELECT
     p.id                                AS poi_id,
     p.categories.primary                AS category,

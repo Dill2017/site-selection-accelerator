@@ -2,7 +2,7 @@
 -- building type categorised from subtype/class, height discretised into bins.
 -- H3 cell pre-computed at resolution 9 to avoid per-row computation at query time.
 -- Z-ordered by bbox coordinates for fast spatial range scans.
-CREATE OR REPLACE TABLE dilshad_shawki.geospatial.gold_buildings AS
+CREATE OR REPLACE TABLE IDENTIFIER({{catalog}} || '.' || {{schema}} || '.gold_buildings') AS
 SELECT
     b.id                                                        AS building_id,
     b.subtype                                                   AS building_subtype,
@@ -31,5 +31,5 @@ SELECT
 FROM carto_overture_maps_buildings.carto.building b
 WHERE b.subtype IS NOT NULL OR b.class IS NOT NULL;
 
-OPTIMIZE dilshad_shawki.geospatial.gold_buildings
+OPTIMIZE IDENTIFIER({{catalog}} || '.' || {{schema}} || '.gold_buildings')
 ZORDER BY (bbox_xmin, bbox_ymin);
