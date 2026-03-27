@@ -67,7 +67,9 @@ class AnalyzeRequest(BaseModel):
     categories: list[str]
     brand_input: BrandInput
     enable_competition: bool = True
-    beta: float = 1.0
+    beta: float = Field(default=1.0, ge=-1.0, le=1.0)
+    alpha: float = 0.5
+    competitor_brand: str = ""
     include_buildings: bool = True
 
 
@@ -95,13 +97,23 @@ class BrandLocationData(BaseModel):
     is_source: bool = True
 
 
+class CompetitorLocationData(BaseModel):
+    lat: float
+    lon: float
+    hex_id: str
+    name: str = ""
+    count: int = 1
+
+
 class AnalyzeResultOut(BaseModel):
     session_id: str
     hexagons: list[HexagonData]
     brand_locations: list[BrandLocationData]
     existing_target_locations: list[BrandLocationData] = []
+    competitor_locations: list[CompetitorLocationData] = []
     city_polygon_geojson: dict | None = None
     has_competition: bool = False
+    competitor_brand: str = ""
     analysis_mode: str = "brand"
     center_lat: float
     center_lon: float
@@ -144,6 +156,8 @@ class CompetitionInfo(BaseModel):
     vibe_score: float
     competitor_count: int
     competition_score: float
+    demand_score: float = 0.0
+    poi_density: int = 0
     opportunity_score: float
     top_competitors: str
 

@@ -20,10 +20,12 @@ export interface AnalysisSummary {
     created_at?: string;
 }
 export interface AnalyzeRequest {
+    alpha?: number;
     beta?: number;
     brand_input: BrandInput;
     categories: string[];
     city: string;
+    competitor_brand?: string;
     country: string;
     enable_competition?: boolean;
     include_buildings?: boolean;
@@ -35,6 +37,9 @@ export interface AnalyzeResultOut {
     center_lat: number;
     center_lon: number;
     city_polygon_geojson?: Record<string, unknown> | null;
+    competitor_brand?: string;
+    competitor_locations?: CompetitorLocationData[];
+    existing_target_locations?: BrandLocationData[];
     has_competition?: boolean;
     hexagons: HexagonData[];
     session_id: string;
@@ -58,12 +63,14 @@ export interface AssetsOut {
 export interface BrandInput {
     geojson?: Record<string, unknown> | null;
     mode: string;
+    selected_poi_ids?: string[] | null;
     value?: string;
 }
 export interface BrandLocationData {
     address?: string;
     count?: number;
     hex_id: string;
+    is_source?: boolean;
     lat: number;
     lon: number;
 }
@@ -104,9 +111,18 @@ export interface CellPOI {
 export interface CompetitionInfo {
     competition_score: number;
     competitor_count: number;
+    demand_score?: number;
     opportunity_score: number;
+    poi_density?: number;
     top_competitors: string;
     vibe_score: number;
+}
+export interface CompetitorLocationData {
+    count?: number;
+    hex_id: string;
+    lat: number;
+    lon: number;
+    name?: string;
 }
 export interface CompetitorPOI {
     address?: string;
@@ -162,6 +178,25 @@ export interface HexagonDetailOut {
 export interface PersistResultOut {
     analysis_id: string;
     tables_written: string[];
+}
+export interface ResolveAddressesRequest {
+    addresses: string;
+    resolution?: number;
+}
+export interface ResolveAddressesResponse {
+    results?: ResolvedAddress[];
+}
+export interface ResolvedAddress {
+    address: string;
+    lat: number;
+    lon: number;
+    pois?: ResolvedPOI[];
+}
+export interface ResolvedPOI {
+    brand?: string;
+    category?: string;
+    name: string;
+    poi_id: string;
 }
 export interface ValidationError {
     ctx?: Record<string, unknown>;
@@ -425,6 +460,42 @@ export function useListCountriesSuspense<TData = {
         queryKey: listCountriesKey(),
         queryFn: ()=>listCountries(),
         ...options?.query
+    });
+}
+export const resolveAddresses = async (data: ResolveAddressesRequest, options?: RequestInit): Promise<{
+    data: ResolveAddressesResponse;
+}> =>{
+    const res = await fetch("/api/resolve-addresses", {
+        ...options,
+        method: "POST",
+        headers: {
+            "Content-Type": "application/json",
+            ...options?.headers
+        },
+        body: JSON.stringify(data)
+    });
+    if (!res.ok) {
+        const body = await res.text();
+        let parsed: unknown;
+        try {
+            parsed = JSON.parse(body);
+        } catch  {
+            parsed = body;
+        }
+        throw new ApiError(res.status, res.statusText, parsed);
+    }
+    return {
+        data: await res.json()
+    };
+};
+export function useResolveAddresses(options?: {
+    mutation?: UseMutationOptions<{
+        data: ResolveAddressesResponse;
+    }, ApiError, ResolveAddressesRequest>;
+}) {
+    return useMutation({
+        mutationFn: (data)=>resolveAddresses(data),
+        ...options?.mutation
     });
 }
 export interface GetResultsParams {

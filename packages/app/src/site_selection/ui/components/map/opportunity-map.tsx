@@ -39,6 +39,7 @@ interface OpportunityMapProps {
   centerLat?: number;
   centerLon?: number;
   hasCompetition?: boolean;
+  competitorBrand?: string;
   onHexClick?: (hex: HexagonData) => void;
   onMapReady?: (map: maplibregl.Map) => void;
   drawingEnabled?: boolean;
@@ -57,6 +58,7 @@ export function OpportunityMap({
   centerLat,
   centerLon,
   hasCompetition = false,
+  competitorBrand = "",
   onHexClick,
   onMapReady,
   drawingEnabled = false,
@@ -224,16 +226,25 @@ export function OpportunityMap({
       );
     }
 
+    const showCompetitorRing = Boolean(competitorBrand);
     result.push(
       new ScatterplotLayer<HexagonData>({
         id: "top-opps",
         data: topOpps,
         getPosition: (d) => [d.lon, d.lat],
         getFillColor: [0, 200, 80, 220],
-        getRadius: 100,
+        getLineColor: (d) =>
+          showCompetitorRing && (d.competitor_count ?? 0) > 0
+            ? [255, 255, 255, 255]
+            : [0, 0, 0, 0],
+        getLineWidth: (d) =>
+          showCompetitorRing && (d.competitor_count ?? 0) > 0 ? 4 : 0,
+        getRadius: 140,
+        stroked: true,
         pickable: false,
-        radiusMinPixels: 3,
-        radiusMaxPixels: 16,
+        radiusMinPixels: 5,
+        radiusMaxPixels: 20,
+        lineWidthMinPixels: 3,
       }),
     );
 
@@ -285,6 +296,7 @@ export function OpportunityMap({
             <TooltipContent
               hex={hoverInfo.hex}
               hasCompetition={hasCompetition}
+              competitorBrand={competitorBrand}
               existingCount={brandCountByHex.get(hoverInfo.hex.hex_id)}
             />
           )}
@@ -318,7 +330,7 @@ export function OpportunityMap({
             </span>
           )}
           <span className="flex items-center gap-1.5">
-            <span className="inline-block h-3 w-3 rounded-full bg-[rgb(0,200,80)]" />
+            <span className="inline-block h-3 w-3 rounded-full border-2 border-white bg-[rgb(0,200,80)]" />
             Top opportunities
           </span>
           <span className="flex items-center gap-1.5">
@@ -351,10 +363,12 @@ function BrandTooltipContent({ brand }: { brand: BrandLocationData }) {
 function TooltipContent({
   hex,
   hasCompetition,
+  competitorBrand,
   existingCount,
 }: {
   hex: HexagonData;
   hasCompetition: boolean;
+  competitorBrand?: string;
   existingCount?: number;
 }) {
   const isExistingCell = Boolean(hex.is_brand_cell);
@@ -400,18 +414,19 @@ function TooltipContent({
                 <span className="font-medium">{hex.poi_count}</span>
               </>
             )}
-            {hasCompetition && (
+            {hasCompetition && (hex.competitor_count ?? 0) > 0 && (
               <>
-                <span className="text-muted-foreground">Competitors</span>
+                <span className="text-muted-foreground">Competition</span>
                 <span className="font-medium">{hex.competitor_count}</span>
               </>
             )}
           </>
         )}
       </div>
-      {!isExistingCell && hex.top_competitors && (
+      {!isExistingCell && (hex.competitor_count ?? 0) > 0 && hex.top_competitors && (
         <div className="pt-1 border-t text-muted-foreground">
-          <span className="font-medium text-foreground">Top Competitors: </span>
+          <span className="font-medium text-foreground">
+            {competitorBrand || "Top Competitors"}: </span>
           {hex.top_competitors}
         </div>
       )}

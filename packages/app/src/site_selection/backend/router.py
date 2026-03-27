@@ -24,6 +24,7 @@ from .models import (
     CategoryGroup,
     CellBreakdownRow,
     CompetitionInfo,
+    CompetitorLocationData,
     CompetitorPOI,
     CellPOI,
     FingerprintRow,
@@ -269,7 +270,7 @@ async def analyze(req: AnalyzeRequest) -> StreamingResponse:
                 if not brand_locations:
                     yield _sse({"type": "error", "message": "No valid locations from map selection"})
                     return
-                if req.enable_competition and req.beta > 0:
+                if req.enable_competition and req.beta != 0:
                     brand_pois_df = infer_location_categories(
                         brand_locations, req.resolution, req.country, req.city,
                         restrict_to_target_city=False,
@@ -416,24 +417,45 @@ async def analyze(req: AnalyzeRequest) -> StreamingResponse:
             else:
                 scored["similarity"] = np.zeros(len(scored))
 
-            # Add cell activity before competition-adjusted scoring so
-            # opportunity can down-rank sparse, low-activity cells.
+            # Add cell activity before competition-adjusted scoring.
+            # Uses count_vectors (POIs + buildings) so demand reflects overall
+            # area density — buildings proxy population/footfall.
             poi_totals = count_vectors.sum(axis=1).rename("poi_density")
             scored = scored.merge(poi_totals, left_on="h3_cell", right_index=True, how="left")
             scored["poi_density"] = scored["poi_density"].fillna(0).astype(int)
 
             # Competition / Saturation
             competitor_pois = None
-            if req.enable_competition and req.beta > 0 and brand_pois_df is not None and not brand_pois_df.empty:
+            named_competitor_found = False
+            if req.enable_competition and req.beta != 0:
                 yield _sse({"type": "progress", "step": "finding_competitors", "pct": 85})
-                competition, competitor_pois = find_competitors_in_similar_cells(
-                    scored, brand_pois=brand_pois_df,
-                    brand_query=req.brand_input.value if req.brand_input.mode == "brand_name" else "",
-                    min_similarity=0.5, country=req.country, city=req.city,
-                    resolution=req.resolution,
-                )
+
+                if req.competitor_brand.strip():
+                    competition, competitor_pois = _find_named_competitor(
+                        req.competitor_brand, scored, req.resolution,
+                        req.country, req.city,
+                    )
+                    if competitor_pois is not None and not competitor_pois.empty:
+                        named_competitor_found = True
+                    else:
+                        log.warning(
+                            "Named competitor '%s' returned no results, "
+                            "falling back to category-based competition",
+                            req.competitor_brand,
+                        )
+
+                if not named_competitor_found and brand_pois_df is not None and not brand_pois_df.empty:
+                    competition, competitor_pois = find_competitors_in_similar_cells(
+                        scored, brand_pois=brand_pois_df,
+                        brand_query=req.brand_input.value if req.brand_input.mode == "brand_name" else "",
+                        min_similarity=0.5, country=req.country, city=req.city,
+                        resolution=req.resolution,
+                    )
+
                 if competitor_pois is not None and not competitor_pois.empty:
-                    scored = compute_opportunity_score(scored, competition, beta=req.beta)
+                    scored = compute_opportunity_score(
+                        scored, competition, beta=req.beta, alpha=req.alpha,
+                    )
 
             address_lookup = get_nearest_address_per_cell(pois_df)
 
@@ -479,13 +501,21 @@ async def analyze(req: AnalyzeRequest) -> StreamingResponse:
             if city_polygon_wkt:
                 city_polygon_geojson = _wkt_to_geojson(city_polygon_wkt)
 
+            comp_loc_list: list[CompetitorLocationData] = []
+            if named_competitor_found and competitor_pois is not None and not competitor_pois.empty:
+                comp_loc_list = _build_competitor_location_list(
+                    competitor_pois, req.resolution,
+                )
+
             result_data = AnalyzeResultOut(
                 session_id=session_id,
                 hexagons=hexagons,
                 brand_locations=brand_locs,
                 existing_target_locations=existing_target_brand_locs,
+                competitor_locations=comp_loc_list,
                 city_polygon_geojson=city_polygon_geojson,
                 has_competition="opportunity_score" in scored.columns,
+                competitor_brand=req.competitor_brand.strip() if named_competitor_found else "",
                 analysis_mode=analysis_mode,
                 center_lat=float(city_h3_cells_df["center_lat"].mean()),
                 center_lon=float(city_h3_cells_df["center_lon"].mean()),
@@ -1114,6 +1144,111 @@ def _build_brand_location_list(
             addr = address_lookup.get(cell_int, "")
         result.append(BrandLocationData(lat=lat, lon=lon, hex_id=hex_id, count=count, address=addr))
     return result
+
+
+def _build_competitor_location_list(
+    competitor_pois: pd.DataFrame,
+    resolution: int,
+) -> list[CompetitorLocationData]:
+    """Build per-cell competitor markers for the map from named competitor POIs."""
+    if competitor_pois is None or competitor_pois.empty:
+        return []
+
+    if "h3_hex" not in competitor_pois.columns:
+        return []
+
+    grouped = competitor_pois.groupby("h3_hex").agg(
+        count=("h3_hex", "size"),
+        name=("shop_name", lambda x: x.value_counts().index[0] if len(x) > 0 else ""),
+    ).reset_index()
+
+    result: list[CompetitorLocationData] = []
+    for _, row in grouped.iterrows():
+        try:
+            lat, lon = h3.cell_to_latlng(str(row["h3_hex"]))
+            result.append(CompetitorLocationData(
+                lat=lat, lon=lon,
+                hex_id=str(row["h3_hex"]),
+                name=str(row["name"]),
+                count=int(row["count"]),
+            ))
+        except Exception:
+            continue
+    return result
+
+
+def _find_named_competitor(
+    competitor_brand: str,
+    scored: pd.DataFrame,
+    resolution: int,
+    country: str,
+    city: str,
+) -> tuple[pd.DataFrame, pd.DataFrame | None]:
+    """Find stores of a specific named competitor via Genie.
+
+    Returns the same (comp_per_cell, competitor_pois) tuple as
+    find_competitors_in_similar_cells for downstream compatibility.
+    """
+    from brand_search import discover_brand_locations
+
+    empty_agg = pd.DataFrame(columns=["h3_hex", "competitor_count", "top_competitors"])
+
+    try:
+        comp_locs, comp_cells, comp_pois_df = discover_brand_locations(
+            competitor_brand, resolution, country=country, city=city,
+        )
+    except Exception as e:
+        log.error("Named competitor Genie lookup failed for '%s': %s", competitor_brand, e)
+        return empty_agg, None
+
+    if comp_pois_df is None or comp_pois_df.empty:
+        log.info("Named competitor '%s': no stores found", competitor_brand)
+        return empty_agg, None
+
+    for col in ("lon", "lat"):
+        if col in comp_pois_df.columns:
+            comp_pois_df[col] = pd.to_numeric(comp_pois_df[col], errors="coerce")
+    comp_pois_df = comp_pois_df.dropna(subset=["lon", "lat"])
+    if comp_pois_df.empty:
+        log.info("Named competitor '%s': no valid coordinates", competitor_brand)
+        return empty_agg, None
+
+    comp_pois_df["h3_hex"] = comp_pois_df.apply(
+        lambda r: h3.latlng_to_cell(float(r["lat"]), float(r["lon"]), resolution),
+        axis=1,
+    )
+
+    scored_hexes = set(scored["h3_cell"].apply(_h3_int_to_hex))
+    comp_pois_df = comp_pois_df[comp_pois_df["h3_hex"].isin(scored_hexes)].copy()
+    if comp_pois_df.empty:
+        log.info("Named competitor '%s': stores found but none overlap scored cells", competitor_brand)
+        return empty_agg, None
+
+    def _name(row: pd.Series) -> str:
+        for col in ("brand_name_primary", "poi_primary_name"):
+            val = _clean_text(row.get(col))
+            if val:
+                return val
+        return competitor_brand
+
+    comp_pois_df["shop_name"] = comp_pois_df.apply(_name, axis=1)
+
+    comp_per_cell = (
+        comp_pois_df.groupby("h3_hex")
+        .agg(
+            competitor_count=("shop_name", "size"),
+            top_competitors=("shop_name", lambda names: ", ".join(
+                f"{n} ({c})" for n, c in names.value_counts().head(3).items()
+            )),
+        )
+        .reset_index()
+    )
+
+    log.info(
+        "Named competitor '%s': %d stores in %d cells",
+        competitor_brand, len(comp_pois_df), len(comp_per_cell),
+    )
+    return comp_per_cell, comp_pois_df
 
 
 def _wkt_to_geojson(wkt_str: str) -> dict | None:

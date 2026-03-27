@@ -5,8 +5,8 @@ env:
     valueFrom: sql-warehouse
   # IMPORTANT: these must match the catalog and schema in databricks.yml
   - name: GOLD_CATALOG
-    value: "CHANGE_ME"
+    value: "beatrice_liew"
   - name: GOLD_SCHEMA
-    value: "site_selection"
+    value: "geospatial"
   - name: GENIE_SPACE_ID
     value: ""

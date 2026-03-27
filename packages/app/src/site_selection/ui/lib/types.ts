@@ -47,6 +47,8 @@ export interface AnalyzeRequest {
   brand_input: BrandInput;
   enable_competition: boolean;
   beta: number;
+  alpha: number;
+  competitor_brand: string;
   include_buildings: boolean;
 }
 
@@ -74,13 +76,23 @@ export interface BrandLocationData {
   is_source: boolean;
 }
 
+export interface CompetitorLocationData {
+  lat: number;
+  lon: number;
+  hex_id: string;
+  name: string;
+  count: number;
+}
+
 export interface AnalyzeResult {
   session_id: string;
   hexagons: HexagonData[];
   brand_locations: BrandLocationData[];
   existing_target_locations: BrandLocationData[];
+  competitor_locations: CompetitorLocationData[];
   city_polygon_geojson: Record<string, unknown> | null;
   has_competition: boolean;
+  competitor_brand: string;
   analysis_mode: "brand" | "location";
   center_lat: number;
   center_lon: number;
@@ -137,6 +149,8 @@ export interface CompetitionInfo {
   vibe_score: number;
   competitor_count: number;
   competition_score: number;
+  demand_score: number;
+  poi_density: number;
   opportunity_score: number;
   top_competitors: string;
 }

@@ -27,12 +27,14 @@ import type { HexagonData, HexagonDetail, GenieDebug } from "@/lib/types";
 interface FingerprintPanelProps {
   hex: HexagonData | null;
   sessionId: string | null;
+  competitorBrand?: string;
   onClose: () => void;
 }
 
 export function FingerprintPanel({
   hex,
   sessionId,
+  competitorBrand = "",
   onClose,
 }: FingerprintPanelProps) {
   const [detail, setDetail] = useState<HexagonDetail | null>(null);
@@ -43,17 +45,13 @@ export function FingerprintPanel({
 
   const [error, setError] = useState<string | null>(null);
 
-  const cellCompetitorBrandCounts = useMemo(() => {
+  const cellCompetitorStores = useMemo(() => {
     if (!detail?.competitor_pois?.length) return [];
-    const counts: Record<string, number> = {};
-    for (const poi of detail.competitor_pois) {
-      const label = competitorLabel(poi);
-      if (!label) continue;
-      counts[label] = (counts[label] || 0) + 1;
-    }
-    return Object.entries(counts)
-      .map(([name, count]) => ({ name, count }))
-      .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
+    return detail.competitor_pois.map((poi) => ({
+      name: cleanText(poi.name) || cleanText(poi.brand) || "—",
+      brand: cleanText(poi.brand) || cleanText(poi.name) || "—",
+      address: cleanText(poi.address) || "—",
+    }));
   }, [detail]);
 
   useEffect(() => {
@@ -121,9 +119,14 @@ export function FingerprintPanel({
               <Badge variant="secondary" className="text-xs">
                 POIs: {detail.poi_count}
               </Badge>
-              {detail.competition && (
+              {detail.competition && detail.competition.competitor_count > 0 && (
                 <Badge variant="secondary" className="text-xs">
-                  Competitors: {detail.competition.competitor_count}
+                  Competition: {detail.competition.competitor_count}
+                </Badge>
+              )}
+              {detail.competition && detail.competition.demand_score != null && (
+                <Badge variant="secondary" className="text-xs">
+                  Demand: {(detail.competition.demand_score * 100).toFixed(0)}%
                 </Badge>
               )}
             </div>
@@ -166,19 +169,11 @@ export function FingerprintPanel({
               metric={metric}
             />
 
-            {/* Competition detail (kept below fingerprint) */}
-            {detail.competition && detail.competition.top_competitors && (
-              <div className="text-xs text-muted-foreground">
-                <span className="font-medium">Nearby competitors:</span>{" "}
-                {detail.competition.top_competitors}
-              </div>
-            )}
-
-            {/* Competitor brands */}
-            {cellCompetitorBrandCounts.length > 0 && (
+            {/* Competitor store details with addresses */}
+            {cellCompetitorStores.length > 0 && (
               <details className="group" open>
                 <summary className="flex cursor-pointer items-center justify-between text-xs font-medium hover:underline list-none">
-                  <span>Competitor Brands</span>
+                  <span>Competitor: {competitorBrand || "Stores"} ({cellCompetitorStores.length})</span>
                   <ChevronDown className="h-3.5 w-3.5 transition-transform group-open:rotate-180" />
                 </summary>
                 <div className="mt-1 max-h-48 overflow-auto rounded border">
@@ -186,16 +181,16 @@ export function FingerprintPanel({
                     <thead className="bg-muted/50 sticky top-0">
                       <tr>
                         <th className="px-2 py-1 text-left font-medium">#</th>
-                        <th className="px-2 py-1 text-left font-medium">Brand / Place</th>
-                        <th className="px-2 py-1 text-right font-medium">Count</th>
+                        <th className="px-2 py-1 text-left font-medium">Name</th>
+                        <th className="px-2 py-1 text-left font-medium">Address</th>
                       </tr>
                     </thead>
                     <tbody>
-                      {cellCompetitorBrandCounts.map((row, i) => (
-                        <tr key={row.name} className="border-t">
+                      {cellCompetitorStores.map((row, i) => (
+                        <tr key={`${row.name}-${i}`} className="border-t">
                           <td className="px-2 py-1 text-muted-foreground">{i + 1}</td>
                           <td className="px-2 py-1">{row.name}</td>
-                          <td className="px-2 py-1 text-right font-medium">{row.count}</td>
+                          <td className="px-2 py-1 text-muted-foreground">{row.address}</td>
                         </tr>
                       ))}
                     </tbody>

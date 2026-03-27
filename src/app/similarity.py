@@ -79,16 +79,30 @@ def compute_opportunity_score(
     scored: pd.DataFrame,
     competition: pd.DataFrame,
     beta: float = 0.5,
+    alpha: float = 0.5,
 ) -> pd.DataFrame:
-    """Apply competition penalty to similarity scores.
+    """Score opportunities using similarity, demand, and competition.
 
-    opportunity_score = similarity * (1 - beta * competition_score)
+    opportunity_score = similarity * demand_boost * competition_factor
+
+    Where:
+      demand_boost       = 1 + alpha * demand_score
+      competition_factor = 1 - beta  * competition_score
+      demand_score       = percentile_rank(poi_density)
+      competition_score  = competitor_count / median(nonzero_counts), clipped to 1
+      final score        = percentile_rank(raw)  (distribution-aware, outlier-resistant)
+
+    Beta range [-1, +1] controls the competition strategy:
+      beta > 0 : penalise (avoid saturated areas)
+      beta = 0 : ignore competition
+      beta < 0 : boost  (mirror / co-locate near competition)
 
     Parameters
     ----------
-    scored : DataFrame from compute_similarity (h3_cell, similarity, is_brand_cell)
-    competition : DataFrame from find_competitors (h3_hex, competitor_count, top_competitors)
-    beta : competition sensitivity (0 = ignore, 1 = max penalty)
+    scored : DataFrame from compute_similarity with poi_density column.
+    competition : DataFrame from find_competitors or named competitor lookup.
+    beta : competition sensitivity (-1 = full mirror, 0 = ignore, +1 = full penalty).
+    alpha : demand sensitivity (0 = ignore demand, 1 = full boost).
     """
     scored = scored.copy()
     scored["h3_hex"] = scored["h3_cell"].apply(h3_int_to_hex)
@@ -101,13 +115,19 @@ def compute_opportunity_score(
     merged["competitor_count"] = merged["competitor_count"].fillna(0).astype(int)
     merged["top_competitors"] = merged["top_competitors"].fillna("")
 
-    max_in_any_cell = competition["competitor_count"].max() if not competition.empty else 1
-    cap = max(max_in_any_cell, 1)
+    nonzero = competition.loc[competition["competitor_count"] > 0, "competitor_count"]
+    cap = max(nonzero.median(), 1) if len(nonzero) > 0 else 1
+    merged["competition_score"] = (merged["competitor_count"] / cap).clip(upper=1.0)
 
-    merged["competition_score"] = merged["competitor_count"] / cap
-    merged["opportunity_score"] = merged["similarity"] * (
-        1 - beta * merged["competition_score"]
-    )
+    if "poi_density" in merged.columns and merged["poi_density"].sum() > 0:
+        merged["demand_score"] = merged["poi_density"].rank(pct=True)
+    else:
+        merged["demand_score"] = 0.0
+
+    merged["demand_boost"] = 1 + alpha * merged["demand_score"]
+    merged["competition_factor"] = 1 - beta * merged["competition_score"]
+    raw = merged["similarity"] * merged["demand_boost"] * merged["competition_factor"]
+    merged["opportunity_score"] = raw.rank(pct=True)
 
     return merged.sort_values(
         "opportunity_score", ascending=False
