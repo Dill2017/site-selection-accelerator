@@ -48,17 +48,111 @@ model.
 
 ---
 
-## Quick Start
+## Prerequisites
 
-### Prerequisites
+Before deploying, ensure your environment meets these requirements:
+
+### Workspace & Compute
 
 | Requirement | Details |
 |---|---|
-| Databricks workspace | With a SQL Warehouse (Serverless or Pro recommended) |
-| Databricks CLI | v0.239.0+ |
-| CARTO Overture Maps | `carto_overture_maps_places`, `carto_overture_maps_divisions`, `carto_overture_maps_buildings` available via Databricks Marketplace / Delta Sharing |
-| APX CLI | [Install from GitHub](https://github.com/databricks-solutions/apx) — required for building and running the full-stack app |
-| Python 3.11+ | With [uv](https://docs.astral.sh/uv/) installed |
+| **Databricks workspace** | Any cloud (AWS, Azure, GCP) with **Unity Catalog** enabled |
+| **SQL Warehouse** | Serverless or Pro recommended. The deploying user and the app service principal both need `CAN_USE` permission |
+| **Foundation Models** | Access via the SQL warehouse for `ai_query()` LLM calls (fingerprint insights). Not required for core functionality |
+
+### CARTO Overture Maps (Databricks Marketplace)
+
+The ETL pipeline reads geospatial data from three CARTO catalogs that must be
+installed from the **Databricks Marketplace** before running the job:
+
+| Marketplace Listing | Expected Catalog Name |
+|---|---|
+| CARTO Overture Maps — Places | `carto_overture_maps_places` |
+| CARTO Overture Maps — Divisions | `carto_overture_maps_divisions` |
+| CARTO Overture Maps — Buildings | `carto_overture_maps_buildings` |
+
+To install: **Workspace → Marketplace → search "CARTO Overture Maps" → Get**.
+
+If your workspace uses different catalog names for these datasets, override the
+`carto_*_catalog` variables in `databricks.yml`.
+
+### Local Tools
+
+| Tool | Version | Install |
+|---|---|---|
+| **Databricks CLI** | v0.239.0+ | [Install guide](https://docs.databricks.com/dev-tools/cli/install.html) |
+| **APX CLI** | Latest | [GitHub](https://github.com/databricks-solutions/apx) |
+| **Python** | 3.11+ | — |
+| **uv** | Latest | [Install](https://docs.astral.sh/uv/) |
+| **bun** | Latest | [Install](https://bun.sh) |
+
+### Cloud-Specific: Node Type for Hex2Vec Training
+
+The ETL job trains Hex2Vec on a single-node cluster. You **must** set
+`node_type_id` in `databricks.yml` to a type available on your cloud:
+
+| Cloud | Recommended `node_type_id` |
+|---|---|
+| **AWS** | `i3.xlarge` |
+| **Azure** | `Standard_DS3_v2` |
+| **GCP** | `n1-standard-4` |
+
+---
+
+## Configuration
+
+All user-specific settings are in **two files** that must be kept in sync:
+
+### 1. `databricks.yml` — Bundle Variables
+
+```yaml
+variables:
+  catalog:
+    default: "my_catalog"             # Your Unity Catalog catalog
+  schema:
+    default: "site_selection"         # Schema (created by ETL job)
+  warehouse_id:
+    lookup:
+      warehouse: "My SQL Warehouse"   # Your SQL warehouse display name
+  node_type_id:
+    default: "i3.xlarge"              # Cloud-specific (see table above)
+```
+
+### 2. `packages/app/app.yml` — App Environment Variables
+
+```yaml
+env:
+  - name: DATABRICKS_WAREHOUSE_ID
+    valueFrom: sql-warehouse
+  - name: GOLD_CATALOG
+    value: "my_catalog"               # Must match catalog above
+  - name: GOLD_SCHEMA
+    value: "site_selection"           # Must match schema above
+  - name: GENIE_SPACE_ID
+    value: ""                         # Leave empty — auto-created by ETL
+```
+
+> **Important:** `GOLD_CATALOG` and `GOLD_SCHEMA` in `app.yml` must exactly
+> match the `catalog` and `schema` variables in `databricks.yml`. If they
+> don't match, the app will fail to find its tables at runtime.
+
+### Optional: CARTO Catalog Overrides
+
+If your CARTO Marketplace catalogs have non-default names:
+
+```yaml
+# In databricks.yml under variables:
+  carto_divisions_catalog:
+    default: "my_custom_carto_divisions"
+  carto_places_catalog:
+    default: "my_custom_carto_places"
+  carto_buildings_catalog:
+    default: "my_custom_carto_buildings"
+```
+
+---
+
+## Deploy
 
 ### 1. Clone and install
 
@@ -74,42 +168,21 @@ uv sync
 databricks auth login --host https://<your-workspace-url>
 ```
 
-### 3. Configure your catalog, schema, and warehouse
+### 3. Configure
 
-Edit **`databricks.yml`** — set your target catalog, schema, and warehouse:
+Edit `databricks.yml` and `packages/app/app.yml` as described in the
+[Configuration](#configuration) section above.
 
-```yaml
-variables:
-  catalog:
-    default: "my_catalog"          # <-- your Unity Catalog catalog
-  schema:
-    default: "site_selection"      # <-- your schema (will be created)
-  warehouse_id:
-    lookup:
-      warehouse: "My SQL Warehouse"  # <-- your SQL warehouse name
-```
-
-Edit **`packages/app/app.yml`** — set the same catalog and schema as environment
-variables for the running app:
-
-```yaml
-env:
-  - name: DATABRICKS_WAREHOUSE_ID
-    valueFrom: sql-warehouse
-  - name: GOLD_CATALOG
-    value: "my_catalog"            # <-- must match catalog above
-  - name: GOLD_SCHEMA
-    value: "site_selection"        # <-- must match schema above
-  - name: GENIE_SPACE_ID
-    value: ""                      # leave empty — auto-created by ETL
-```
-
-### 4. Deploy
+### 4. Build and deploy
 
 ```bash
 uv run apx build
 databricks bundle deploy
 ```
+
+> **Note:** `apx build` requires PyPI access to download build dependencies
+> (`hatchling`, `uv-dynamic-versioning`). If your environment blocks PyPI,
+> see [Build in Restricted Environments](#build-in-restricted-environments).
 
 ### 5. Run the ETL pipeline
 
@@ -120,8 +193,20 @@ pretrained Hex2Vec model — everything the app needs:
 databricks bundle run geospatial_etl_job
 ```
 
-The job takes ~10 minutes. You can monitor it from the Jobs UI link printed in
-the terminal.
+**What it does (in order):**
+
+| Task | Duration | Description |
+|---|---|---|
+| `setup_schema` | ~5s | Creates `{catalog}.{schema}` if it doesn't exist |
+| `create_gold_cities` | ~1 min | Builds city polygon lookup from CARTO Divisions |
+| `create_gold_places` | ~2 min | Extracts POI coordinates and categories from CARTO Places |
+| `create_gold_buildings` | ~3 min | Extracts building footprints from CARTO Buildings |
+| `create_gold_places_enriched` | ~2 min | Full POI table with brands, addresses, coordinates |
+| `create_analysis_tables` | ~5s | DDL for the five analysis result tables |
+| `setup_genie_space` | ~30s | Creates/updates Genie Space, grants app SP access, writes config |
+| `train_hex2vec` | ~5 min | Trains Hex2Vec embedding model on 37 cities |
+
+Monitor the job from the Databricks Jobs UI (link printed in terminal).
 
 ### 6. Launch the app
 
@@ -129,26 +214,63 @@ the terminal.
 databricks bundle run site_selection_app
 ```
 
-The app URL will appear in the Databricks Apps UI. Open it in your browser.
+Open the app URL from the Databricks Apps UI. On first load you should see:
+- Country dropdown populated with country codes
+- City dropdown populated after selecting a country
+- All POI categories checked by default
+
+If dropdowns are empty or you see errors, check [Troubleshooting](#troubleshooting).
 
 ---
 
 ## Required Permissions
 
-The deploying user and the app service principal need the following access:
+### Deploying User
 
-| Resource | Permission | Why |
+The user running `databricks bundle deploy` and `databricks bundle run` needs:
+
+| Resource | Permission |
+|---|---|
+| Workspace | Ability to create apps, jobs |
+| Target catalog | `USE CATALOG`, `CREATE SCHEMA` |
+| CARTO catalogs | `USE CATALOG`, `USE SCHEMA`, `SELECT` |
+
+### App Service Principal
+
+The Databricks App runs under an automatically-created service principal. The
+ETL job's `setup_genie_space` task automatically grants:
+
+| Resource | Permission | Granted By |
 |---|---|---|
-| **Catalog** (e.g. `my_catalog`) | `USE CATALOG`, `CREATE SCHEMA` | ETL creates the schema and tables |
-| **Schema** (e.g. `my_catalog.site_selection`) | `USE SCHEMA`, `CREATE TABLE`, `SELECT`, `MODIFY` | Read gold tables, write analysis results |
-| **SQL Warehouse** | `CAN_USE` | All queries and `ai_query()` LLM calls |
-| **CARTO Overture Maps catalogs** | `SELECT` | ETL reads source data (`carto_overture_maps_places`, `_divisions`, `_buildings`) |
-| **UC Volume** (`/Volumes/{catalog}/{schema}/models/`) | `READ FILES`, `WRITE FILES` | Store and load the pretrained Hex2Vec model |
-| **Genie Space** | `CAN_RUN` | Auto-granted to the app service principal by the ETL |
-| **Foundation Model endpoints** | Access via SQL warehouse | `ai_query()` calls for LLM-powered fingerprint insights and competition filtering |
+| SQL Warehouse | `CAN_USE` | Bundle resource binding (`site_selection_app.yml`) |
+| Genie Space | `CAN_RUN` | `setup_genie_space.py` |
+| Target catalog | `USE CATALOG` | `setup_genie_space.py` |
+| Target schema | `USE SCHEMA`, `SELECT`, `MODIFY` | `setup_genie_space.py` |
 
-The ETL job's `setup_genie_space` task automatically grants `CAN_RUN` on the
-Genie Space to the app's service principal.
+If the automatic grants fail (e.g. due to permission restrictions), you can
+grant them manually. Find the app service principal name in the Databricks Apps
+UI, then run:
+
+```sql
+-- Replace <sp_name> with the app's service principal display name
+-- Replace <catalog>.<schema> with your values
+
+GRANT USE CATALOG ON CATALOG `<catalog>` TO `<sp_name>`;
+GRANT USE SCHEMA ON SCHEMA `<catalog>`.`<schema>` TO `<sp_name>`;
+GRANT SELECT ON SCHEMA `<catalog>`.`<schema>` TO `<sp_name>`;
+GRANT MODIFY ON SCHEMA `<catalog>`.`<schema>` TO `<sp_name>`;
+```
+
+For the SQL warehouse, use the Databricks CLI:
+
+```bash
+# Find the warehouse ID
+databricks warehouses list
+
+# Grant CAN_USE (replace <warehouse_id> and <sp_client_id>)
+databricks warehouses update-permissions <warehouse_id> \
+  --json '{"access_control_list": [{"service_principal_name": "<sp_client_id>", "permission_level": "CAN_USE"}]}'
+```
 
 ---
 
@@ -321,7 +443,7 @@ The `geospatial_etl_job` runs these tasks in order:
 3. **Analysis tables** — create the five analysis result tables
 4. **Genie Space** — provision a Genie Space with H3 spatial instructions,
    analysis table instructions, and example queries; grant the app service
-   principal `CAN_RUN` access
+   principal `CAN_RUN` access and `SELECT`/`MODIFY` on the schema
 5. **Hex2Vec training** — train an embedding model on 37 cities and save to a
    UC Volume
 
@@ -375,12 +497,39 @@ All configuration is in two files:
 | `databricks.yml` | `variables.catalog` | Unity Catalog catalog for all tables |
 | `databricks.yml` | `variables.schema` | Schema for all tables |
 | `databricks.yml` | `variables.warehouse_id` | SQL warehouse (by name lookup) |
+| `databricks.yml` | `variables.node_type_id` | Cloud-specific instance type for Hex2Vec training |
+| `databricks.yml` | `variables.carto_*_catalog` | Override CARTO Marketplace catalog names |
 | `packages/app/app.yml` | `GOLD_CATALOG` env | Must match `variables.catalog` |
 | `packages/app/app.yml` | `GOLD_SCHEMA` env | Must match `variables.schema` |
 | `packages/app/app.yml` | `GENIE_SPACE_ID` env | Leave empty for auto-provisioning |
 
 To change catalog/schema: update both files, then re-run `databricks bundle deploy`
 and `databricks bundle run geospatial_etl_job`.
+
+---
+
+## Build in Restricted Environments
+
+The `apx build` command uses `hatchling` and `uv-dynamic-versioning` as Python
+build-system dependencies, which are fetched from PyPI at build time.
+
+If your environment **blocks PyPI access** (corporate firewall, air-gapped
+network), the build will fail with a connection error. Options:
+
+1. **Pre-install build deps** — run `uv pip install hatchling uv-dynamic-versioning`
+   before building, then set `UV_NO_BUILD_ISOLATION=1`:
+   ```bash
+   UV_NO_BUILD_ISOLATION=1 uv run apx build
+   ```
+
+2. **Use a PyPI mirror** — set `UV_INDEX_URL` to your internal mirror:
+   ```bash
+   UV_INDEX_URL=https://pypi.internal.example.com/simple uv run apx build
+   ```
+
+3. **Build on a machine with internet** — run `uv run apx build` on a connected
+   machine, then copy `packages/app/.build/` to the restricted environment
+   before running `databricks bundle deploy`.
 
 ---
 
@@ -400,15 +549,35 @@ and `databricks bundle run geospatial_etl_job`.
 
 ## Troubleshooting
 
-| Issue | Resolution |
-|---|---|
-| Gold tables don't exist | Run `databricks bundle run geospatial_etl_job` |
-| Genie returns empty results | Verify `gold_places_enriched` exists; re-run `setup_genie_space.py` |
-| "No POIs found" | Broaden category selection or use a coarser H3 resolution |
-| Save Analysis fails | Check that analysis tables exist (run ETL, or the app creates them on first save) |
-| Fingerprint shows fallback text | SQL warehouse may lack Foundation Model access; check backend logs |
-| Dropdowns empty in deployed app | Verify `GOLD_CATALOG` and `GOLD_SCHEMA` in `app.yml` match your tables |
-| `bundle deploy` skips build | Ensure `sync.include: [packages/app/.build]` is in `databricks.yml` |
+### Deployment Errors
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `apx build` fails with "connection refused" or PyPI timeout | PyPI access blocked | See [Build in Restricted Environments](#build-in-restricted-environments) |
+| `bundle deploy` fails with "warehouse not found" | `warehouse_id.lookup.warehouse` name doesn't match | Run `databricks warehouses list` and use the exact display name |
+| `bundle deploy` fails with empty `node_type_id` | Variable not set | Add your cloud-specific node type to `databricks.yml` (see [Prerequisites](#cloud-specific-node-type-for-hex2vec-training)) |
+
+### ETL Job Errors
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| SQL tasks fail with "table not found" | CARTO catalogs not installed | Install from Marketplace (see [Prerequisites](#carto-overture-maps-databricks-marketplace)) |
+| `train_hex2vec` fails to provision cluster | Wrong `node_type_id` for your cloud | Update `databricks.yml` with the correct instance type |
+| `setup_genie_space` fails with permission error | Insufficient privileges | Ensure deploying user has `USE CATALOG` on target catalog |
+
+### App Runtime Errors
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| Empty country/city dropdowns | Gold tables don't exist | Run `databricks bundle run geospatial_etl_job` |
+| `Countries API: 500` | App can't connect to SQL warehouse | Check that `DATABRICKS_WAREHOUSE_ID` is set in `app.yml` via the `sql-warehouse` resource binding |
+| `500 — You do not have permission to use the SQL Warehouse` | App service principal lacks `CAN_USE` | Grant manually — see [Required Permissions](#app-service-principal) |
+| `500 — GOLD_CATALOG is not configured` | `GOLD_CATALOG` in `app.yml` still set to `CHANGE_ME` | Update `app.yml` with your actual catalog name, redeploy |
+| `500 — Table not found` | Catalog/schema mismatch between `app.yml` and `databricks.yml` | Ensure `GOLD_CATALOG` and `GOLD_SCHEMA` in `app.yml` match the bundle variables |
+| Save Analysis fails with "Failed to create analysis tables" | App SP can't create tables | Grant `MODIFY` on the schema to the app SP |
+| "No POIs found" | No data for selected categories in that city | Broaden category selection or use a coarser H3 resolution |
+| Fingerprint shows fallback text | SQL warehouse may lack Foundation Model access | Check backend logs; `ai_query()` requires a model serving endpoint |
+| App crashes immediately after deploy | `__version__` import error in wheel | Rebuild with `uv run apx build` (ensures correct `__init__.py`) |
 
 ---
 

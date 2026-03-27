@@ -90,40 +90,53 @@ async def version():
     return VersionOut.from_metadata()
 
 
+
 # -- Config -------------------------------------------------------------------
 
 @router.get("/config", response_model=AppConfigOut, operation_id="getConfig")
 async def get_config():
-    from config import (
-        CATEGORY_GROUPS,
-        BUILDING_CATEGORY_GROUPS,
-        H3_RESOLUTIONS,
-        DEFAULT_H3_RESOLUTION,
-    )
-    return AppConfigOut(
-        h3_resolutions=H3_RESOLUTIONS,
-        default_resolution=DEFAULT_H3_RESOLUTION,
-        category_groups=[
-            CategoryGroup(name=k, categories=v) for k, v in CATEGORY_GROUPS.items()
-        ],
-        building_category_groups=[
-            CategoryGroup(name=k, categories=v) for k, v in BUILDING_CATEGORY_GROUPS.items()
-        ],
-    )
+    try:
+        from config import (
+            CATEGORY_GROUPS,
+            BUILDING_CATEGORY_GROUPS,
+            H3_RESOLUTIONS,
+            DEFAULT_H3_RESOLUTION,
+        )
+        return AppConfigOut(
+            h3_resolutions=H3_RESOLUTIONS,
+            default_resolution=DEFAULT_H3_RESOLUTION,
+            category_groups=[
+                CategoryGroup(name=k, categories=v) for k, v in CATEGORY_GROUPS.items()
+            ],
+            building_category_groups=[
+                CategoryGroup(name=k, categories=v) for k, v in BUILDING_CATEGORY_GROUPS.items()
+            ],
+        )
+    except Exception as e:
+        log.exception("config endpoint failed")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # -- Countries / Cities -------------------------------------------------------
 
 @router.get("/countries", response_model=list[str], operation_id="listCountries")
 async def list_countries():
-    from pipeline import get_countries
-    return get_countries()
+    try:
+        from pipeline import get_countries
+        return get_countries()
+    except Exception as e:
+        log.exception("countries endpoint failed")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/cities", response_model=list[str], operation_id="listCities")
 async def list_cities(country: str = Query(...)):
-    from pipeline import get_cities
-    return get_cities(country)
+    try:
+        from pipeline import get_cities
+        return get_cities(country)
+    except Exception as e:
+        log.exception("cities endpoint failed")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # -- Address Resolution --------------------------------------------------------
@@ -139,51 +152,61 @@ async def resolve_addresses(req: ResolveAddressesRequest):
     The frontend uses this to let the user disambiguate which POI(s)
     they actually mean before running the full analysis.
     """
-    from geopy.geocoders import Nominatim
-    from db import execute_query
-    import config as cfg
+    try:
+        from geopy.geocoders import Nominatim
+        from db import execute_query
+        import config as cfg
 
-    geocoder = Nominatim(user_agent="site-selection-accelerator")
-    results: list[ResolvedAddress] = []
+        geocoder = Nominatim(user_agent="site-selection-accelerator")
+        results: list[ResolvedAddress] = []
 
-    for line in req.addresses.strip().splitlines():
-        addr = line.strip()
-        if not addr:
-            continue
-        geo_result = geocoder.geocode(addr, timeout=10)
-        if not geo_result:
-            continue
+        for line in req.addresses.strip().splitlines():
+            addr = line.strip()
+            if not addr:
+                continue
+            try:
+                geo_result = geocoder.geocode(addr, timeout=10)
+            except Exception as geo_err:
+                log.warning("Geocoding failed for '%s': %s", addr, geo_err)
+                continue
+            if not geo_result:
+                continue
 
-        lat, lon = geo_result.latitude, geo_result.longitude
-        source_parts = [p.strip() for p in addr.split(",") if p.strip()]
-        source_line = source_parts[0] if source_parts else addr
-        escaped = source_line.replace("'", "''")
+            lat, lon = geo_result.latitude, geo_result.longitude
+            source_parts = [p.strip() for p in addr.split(",") if p.strip()]
+            source_line = source_parts[0] if source_parts else addr
+            escaped = source_line.replace("'", "''")
 
-        try:
-            poi_df = execute_query(f"""
-                SELECT p.poi_id, p.poi_primary_name, p.basic_category,
-                       p.brand_name_primary
-                FROM {cfg.GOLD_PLACES_ENRICHED} p
-                WHERE p.lon IS NOT NULL AND p.lat IS NOT NULL
-                  AND lower(trim(p.address_line)) = lower(trim('{escaped}'))
-            """)
-        except Exception:
-            poi_df = pd.DataFrame()
+            try:
+                poi_df = execute_query(f"""
+                    SELECT p.poi_id, p.poi_primary_name, p.basic_category,
+                           p.brand_name_primary
+                    FROM {cfg.GOLD_PLACES_ENRICHED} p
+                    WHERE p.lon IS NOT NULL AND p.lat IS NOT NULL
+                      AND lower(trim(p.address_line)) = lower(trim('{escaped}'))
+                """)
+            except Exception:
+                poi_df = pd.DataFrame()
 
-        pois = []
-        for _, row in poi_df.iterrows():
-            name = str(row.get("poi_primary_name", "") or "")
-            brand = str(row.get("brand_name_primary", "") or "")
-            pois.append(ResolvedPOI(
-                poi_id=str(row["poi_id"]),
-                name=name or brand or "Unknown",
-                brand=brand,
-                category=str(row.get("basic_category", "") or ""),
-            ))
+            pois = []
+            for _, row in poi_df.iterrows():
+                name = str(row.get("poi_primary_name", "") or "")
+                brand = str(row.get("brand_name_primary", "") or "")
+                pois.append(ResolvedPOI(
+                    poi_id=str(row["poi_id"]),
+                    name=name or brand or "Unknown",
+                    brand=brand,
+                    category=str(row.get("basic_category", "") or ""),
+                ))
 
-        results.append(ResolvedAddress(address=addr, lat=lat, lon=lon, pois=pois))
+            results.append(ResolvedAddress(address=addr, lat=lat, lon=lon, pois=pois))
 
-    return ResolveAddressesResponse(results=results)
+        return ResolveAddressesResponse(results=results)
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.exception("resolve-addresses endpoint failed")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # -- Analyze (SSE) ------------------------------------------------------------
@@ -486,25 +509,31 @@ async def analyze(req: AnalyzeRequest) -> StreamingResponse:
 
 @router.get("/results/{session_id}", response_model=AnalyzeResultOut, operation_id="getResults")
 async def get_results(session_id: str):
-    pr = _get_result(session_id)
-    hexagons = _build_hexagon_list(pr.scored, pr.address_lookup, pr.count_vectors, pr.brand_avg)
-    brand_locs = _build_brand_location_list(
-        pr.brand_locations,
-        h3.get_resolution(_h3_int_to_hex(pr.scored["h3_cell"].iloc[0])),
-        pr.address_lookup,
-    )
-    city_polygon_geojson = _wkt_to_geojson(pr.city_polygon_wkt) if pr.city_polygon_wkt else None
+    try:
+        pr = _get_result(session_id)
+        hexagons = _build_hexagon_list(pr.scored, pr.address_lookup, pr.count_vectors, pr.brand_avg)
 
-    return AnalyzeResultOut(
-        session_id=session_id,
-        hexagons=hexagons,
-        brand_locations=brand_locs,
-        city_polygon_geojson=city_polygon_geojson,
-        has_competition="opportunity_score" in pr.scored.columns,
-        analysis_mode=getattr(pr, "analysis_mode", "brand"),
-        center_lat=float(pr.city_h3_cells_df["center_lat"].mean()),
-        center_lon=float(pr.city_h3_cells_df["center_lon"].mean()),
-    )
+        if pr.scored.empty:
+            raise HTTPException(status_code=404, detail="No scored hexagons in this session")
+        resolution = h3.get_resolution(_h3_int_to_hex(pr.scored["h3_cell"].iloc[0]))
+        brand_locs = _build_brand_location_list(pr.brand_locations, resolution, pr.address_lookup)
+        city_polygon_geojson = _wkt_to_geojson(pr.city_polygon_wkt) if pr.city_polygon_wkt else None
+
+        return AnalyzeResultOut(
+            session_id=session_id,
+            hexagons=hexagons,
+            brand_locations=brand_locs,
+            city_polygon_geojson=city_polygon_geojson,
+            has_competition="opportunity_score" in pr.scored.columns,
+            analysis_mode=getattr(pr, "analysis_mode", "brand"),
+            center_lat=float(pr.city_h3_cells_df["center_lat"].mean()),
+            center_lon=float(pr.city_h3_cells_df["center_lon"].mean()),
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.exception("get_results endpoint failed")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # -- Brand Profile ------------------------------------------------------------
@@ -515,59 +544,64 @@ async def get_results(session_id: str):
     operation_id="getBrandProfile",
 )
 async def get_brand_profile(session_id: str):
-    pr = _get_result(session_id)
-    from config import ALL_BUILDING_CATEGORIES, ALL_FEATURE_GROUPS
+    try:
+        pr = _get_result(session_id)
+        from config import ALL_BUILDING_CATEGORIES, ALL_FEATURE_GROUPS
 
-    brand_avg = pr.brand_avg
-    avg_nonzero = brand_avg[brand_avg > 0].sort_values(ascending=False)
+        brand_avg = pr.brand_avg
+        avg_nonzero = brand_avg[brand_avg > 0].sort_values(ascending=False)
 
-    avg_items: list[CategoryAvgItem] = []
-    if not avg_nonzero.empty:
-        bldg_set = set(ALL_BUILDING_CATEGORIES)
-        group_lookup = {}
-        for grp, cats in ALL_FEATURE_GROUPS.items():
-            for c in cats:
-                group_lookup[c] = grp
+        avg_items: list[CategoryAvgItem] = []
+        if not avg_nonzero.empty:
+            bldg_set = set(ALL_BUILDING_CATEGORIES)
+            group_lookup = {}
+            for grp, cats in ALL_FEATURE_GROUPS.items():
+                for c in cats:
+                    group_lookup[c] = grp
 
-        avg_df = avg_nonzero.reset_index()
-        avg_df.columns = ["category_raw", "avg_count"]
-        avg_df["feature_type"] = avg_df["category_raw"].apply(
-            lambda c: "Building" if c in bldg_set else "POI"
-        )
-        for ft in ("POI", "Building"):
-            mask = avg_df["feature_type"] == ft
-            ft_total = avg_df.loc[mask, "avg_count"].sum()
-            if ft_total > 0:
-                avg_df.loc[mask, "pct"] = (avg_df.loc[mask, "avg_count"] / ft_total * 100).round(1)
-            else:
-                avg_df.loc[mask, "pct"] = 0.0
+            avg_df = avg_nonzero.reset_index()
+            avg_df.columns = ["category_raw", "avg_count"]
+            avg_df["feature_type"] = avg_df["category_raw"].apply(
+                lambda c: "Building" if c in bldg_set else "POI"
+            )
+            for ft in ("POI", "Building"):
+                mask = avg_df["feature_type"] == ft
+                ft_total = avg_df.loc[mask, "avg_count"].sum()
+                if ft_total > 0:
+                    avg_df.loc[mask, "pct"] = (avg_df.loc[mask, "avg_count"] / ft_total * 100).round(1)
+                else:
+                    avg_df.loc[mask, "pct"] = 0.0
 
-        for _, row in avg_df.iterrows():
-            cat_display = row["category_raw"].replace("_", " ").title()
-            avg_items.append(CategoryAvgItem(
-                category=cat_display,
-                avg_count=round(float(row["avg_count"]), 2),
-                pct_within_type=float(row.get("pct", 0)),
-                feature_type=row["feature_type"],
-                group=group_lookup.get(row["category_raw"], "Other"),
-            ))
+            for _, row in avg_df.iterrows():
+                cat_display = row["category_raw"].replace("_", " ").title()
+                avg_items.append(CategoryAvgItem(
+                    category=cat_display,
+                    avg_count=round(float(row["avg_count"]), 2),
+                    pct_within_type=float(row.get("pct", 0)),
+                    feature_type=row["feature_type"],
+                    group=group_lookup.get(row["category_raw"], "Other"),
+                ))
 
-    # Per-cell breakdown
-    cell_rows: list[CellBreakdownRow] = []
-    brand_cells_df = pr.brand_profile["cells"]
-    if not brand_cells_df.empty:
-        for cell_id, row in brand_cells_df.iterrows():
-            loc_label = pr.address_lookup.get(cell_id, _h3_int_to_hex(cell_id))
-            for cat in brand_cells_df.columns:
-                val = float(row[cat])
-                if val > 0:
-                    cell_rows.append(CellBreakdownRow(
-                        location=loc_label,
-                        category=cat.replace("_", " ").title(),
-                        count=val,
-                    ))
+        cell_rows: list[CellBreakdownRow] = []
+        brand_cells_df = pr.brand_profile["cells"]
+        if not brand_cells_df.empty:
+            for cell_id, row in brand_cells_df.iterrows():
+                loc_label = pr.address_lookup.get(cell_id, _h3_int_to_hex(cell_id))
+                for cat in brand_cells_df.columns:
+                    val = float(row[cat])
+                    if val > 0:
+                        cell_rows.append(CellBreakdownRow(
+                            location=loc_label,
+                            category=cat.replace("_", " ").title(),
+                            count=val,
+                        ))
 
-    return BrandProfileOut(avg_profile=avg_items, cell_breakdown=cell_rows)
+        return BrandProfileOut(avg_profile=avg_items, cell_breakdown=cell_rows)
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.exception("brand-profile endpoint failed")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # -- Hexagon Detail -----------------------------------------------------------
@@ -578,105 +612,111 @@ async def get_brand_profile(session_id: str):
     operation_id="getHexagonDetail",
 )
 async def get_hexagon_detail(session_id: str, hex_id: str):
-    pr = _get_result(session_id)
-    h3_cell = h3.str_to_int(hex_id)
-    from explainability import (
-        build_fingerprint_df,
-        explain_competition,
-        summarise_fingerprint,
-    )
-
-    fingerprint_df = build_fingerprint_df(h3_cell, pr.count_vectors, pr.brand_avg)
     try:
-        summary = summarise_fingerprint(fingerprint_df)
-    except Exception as exc:
-        log.warning("summarise_fingerprint error: %s", exc)
-        summary = ""
-    fp_rows: list[FingerprintRow] = []
-    if not fingerprint_df.empty:
-        for _, row in fingerprint_df.iterrows():
-            fp_rows.append(FingerprintRow(
-                category=row["Category"],
-                group=row["Group"],
-                feature_type=row["Feature Type"],
-                this_location=float(row["This Location"]),
-                brand_average=float(row["Brand Average"]),
-                this_location_pct=float(row["This Location (%)"]),
-                brand_average_pct=float(row["Brand Average (%)"]),
-            ))
+        pr = _get_result(session_id)
+        h3_cell = h3.str_to_int(hex_id)
+        from explainability import (
+            build_fingerprint_df,
+            explain_competition,
+            summarise_fingerprint,
+        )
 
-    comp_info = None
-    if "opportunity_score" in pr.scored.columns:
-        comp_raw = explain_competition(h3_cell, pr.scored)
-        if comp_raw:
-            comp_info = CompetitionInfo(**comp_raw)
-
-    hex_id = _h3_int_to_hex(h3_cell)
-    address = pr.address_lookup.get(h3_cell, "")
-
-    cell_competitor_pois: list[CompetitorPOI] = []
-    if pr.competitor_pois is not None and not pr.competitor_pois.empty:
-        cell_comps = pr.competitor_pois[pr.competitor_pois["h3_hex"] == hex_id]
-        for _, cr in cell_comps.iterrows():
-            cell_competitor_pois.append(CompetitorPOI(
-                name=_clean_text(cr.get("poi_primary_name")),
-                category=_clean_text(cr.get("basic_category", cr.get("poi_primary_category", ""))),
-                brand=_clean_text(cr.get("brand_name_primary")),
-                address=_clean_text(cr.get("address_line")),
-            ))
-
-    cell_pois: list[CellPOI] = []
-    cell_pois_title = ""
-    if pr.brand_pois is not None and not pr.brand_pois.empty:
-        bp = pr.brand_pois.copy()
-        if "h3_cell" not in bp.columns and {"lon", "lat"}.issubset(bp.columns):
-            resolution = h3.get_resolution(hex_id)
-            bp["h3_cell"] = bp.apply(
-                lambda r: h3.latlng_to_cell(float(r["lat"]), float(r["lon"]), resolution)
-                if pd.notna(r.get("lat")) and pd.notna(r.get("lon")) else "",
-                axis=1,
-            )
-
-        cell_matches = bp[bp["h3_cell"].astype(str) == hex_id]
-        if not cell_matches.empty:
-            cell_pois_title = "Existing locations in this cell"
-
-            for _, row in cell_matches.iterrows():
-                name = _clean_text(row.get("poi_primary_name"))
-                if not name:
-                    continue
-                cell_pois.append(CellPOI(
-                    name=name,
-                    category=_clean_text(row.get("basic_category", row.get("poi_primary_category", ""))),
-                    brand=_clean_text(row.get("brand_name_primary")),
-                    address=_clean_text(row.get("address_line")),
+        fingerprint_df = build_fingerprint_df(h3_cell, pr.count_vectors, pr.brand_avg)
+        try:
+            summary = summarise_fingerprint(fingerprint_df)
+        except Exception as exc:
+            log.warning("summarise_fingerprint error: %s", exc)
+            summary = ""
+        fp_rows: list[FingerprintRow] = []
+        if not fingerprint_df.empty:
+            for _, row in fingerprint_df.iterrows():
+                fp_rows.append(FingerprintRow(
+                    category=row["Category"],
+                    group=row["Group"],
+                    feature_type=row["Feature Type"],
+                    this_location=float(row["This Location"]),
+                    brand_average=float(row["Brand Average"]),
+                    this_location_pct=float(row["This Location (%)"]),
+                    brand_average_pct=float(row["Brand Average (%)"]),
                 ))
 
-    row_match = pr.scored[pr.scored["h3_cell"] == h3_cell]
-    similarity = float(row_match.iloc[0]["similarity"]) if not row_match.empty else 0.0
-    opp_score = None
-    poi_count = 0
-    if not row_match.empty:
-        r = row_match.iloc[0]
-        if "opportunity_score" in r.index:
-            opp_score = float(r["opportunity_score"])
-        if "poi_density" in r.index:
-            poi_count = int(r["poi_density"])
+        comp_info = None
+        if "opportunity_score" in pr.scored.columns:
+            comp_raw = explain_competition(h3_cell, pr.scored)
+            if comp_raw:
+                comp_info = CompetitionInfo(**comp_raw)
 
-    return HexagonDetailOut(
-        h3_cell=h3_cell,
-        hex_id=hex_id,
-        address=address,
-        similarity=similarity,
-        opportunity_score=opp_score,
-        poi_count=poi_count,
-        explanation_summary=summary,
-        competition=comp_info,
-        competitor_pois=cell_competitor_pois,
-        cell_pois_title=cell_pois_title,
-        cell_pois=cell_pois,
-        fingerprint=fp_rows,
-    )
+        hex_id = _h3_int_to_hex(h3_cell)
+        address = pr.address_lookup.get(h3_cell, "")
+
+        cell_competitor_pois: list[CompetitorPOI] = []
+        if pr.competitor_pois is not None and not pr.competitor_pois.empty:
+            cell_comps = pr.competitor_pois[pr.competitor_pois["h3_hex"] == hex_id]
+            for _, cr in cell_comps.iterrows():
+                cell_competitor_pois.append(CompetitorPOI(
+                    name=_clean_text(cr.get("poi_primary_name")),
+                    category=_clean_text(cr.get("basic_category", cr.get("poi_primary_category", ""))),
+                    brand=_clean_text(cr.get("brand_name_primary")),
+                    address=_clean_text(cr.get("address_line")),
+                ))
+
+        cell_pois: list[CellPOI] = []
+        cell_pois_title = ""
+        if pr.brand_pois is not None and not pr.brand_pois.empty:
+            bp = pr.brand_pois.copy()
+            if "h3_cell" not in bp.columns and {"lon", "lat"}.issubset(bp.columns):
+                resolution = h3.get_resolution(hex_id)
+                bp["h3_cell"] = bp.apply(
+                    lambda r: h3.latlng_to_cell(float(r["lat"]), float(r["lon"]), resolution)
+                    if pd.notna(r.get("lat")) and pd.notna(r.get("lon")) else "",
+                    axis=1,
+                )
+
+            cell_matches = bp[bp["h3_cell"].astype(str) == hex_id]
+            if not cell_matches.empty:
+                cell_pois_title = "Existing locations in this cell"
+
+                for _, row in cell_matches.iterrows():
+                    name = _clean_text(row.get("poi_primary_name"))
+                    if not name:
+                        continue
+                    cell_pois.append(CellPOI(
+                        name=name,
+                        category=_clean_text(row.get("basic_category", row.get("poi_primary_category", ""))),
+                        brand=_clean_text(row.get("brand_name_primary")),
+                        address=_clean_text(row.get("address_line")),
+                    ))
+
+        row_match = pr.scored[pr.scored["h3_cell"] == h3_cell]
+        similarity = float(row_match.iloc[0]["similarity"]) if not row_match.empty else 0.0
+        opp_score = None
+        poi_count = 0
+        if not row_match.empty:
+            r = row_match.iloc[0]
+            if "opportunity_score" in r.index:
+                opp_score = float(r["opportunity_score"])
+            if "poi_density" in r.index:
+                poi_count = int(r["poi_density"])
+
+        return HexagonDetailOut(
+            h3_cell=h3_cell,
+            hex_id=hex_id,
+            address=address,
+            similarity=similarity,
+            opportunity_score=opp_score,
+            poi_count=poi_count,
+            explanation_summary=summary,
+            competition=comp_info,
+            competitor_pois=cell_competitor_pois,
+            cell_pois_title=cell_pois_title,
+            cell_pois=cell_pois,
+            fingerprint=fp_rows,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.exception("hexagon-detail endpoint failed")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # -- Genie Debug (brand POIs + competitor summary) ----------------------------
@@ -687,29 +727,35 @@ async def get_hexagon_detail(session_id: str, hex_id: str):
     operation_id="getGenieDebug",
 )
 async def get_genie_debug(session_id: str):
-    pr = _get_result(session_id)
+    try:
+        pr = _get_result(session_id)
 
-    brand_rows: list[BrandPOIRow] = []
-    if pr.brand_pois is not None and not pr.brand_pois.empty:
-        for _, row in pr.brand_pois.iterrows():
-            brand_rows.append(BrandPOIRow(
-                name=str(row.get("poi_primary_name", "")),
-                category=str(row.get("basic_category", row.get("poi_primary_category", ""))),
-                brand=str(row.get("brand_name_primary", "") or ""),
-                lat=float(row["lat"]) if pd.notna(row.get("lat")) else None,
-                lon=float(row["lon"]) if pd.notna(row.get("lon")) else None,
-                h3_cell=str(row.get("h3_cell", "")),
-            ))
+        brand_rows: list[BrandPOIRow] = []
+        if pr.brand_pois is not None and not pr.brand_pois.empty:
+            for _, row in pr.brand_pois.iterrows():
+                brand_rows.append(BrandPOIRow(
+                    name=str(row.get("poi_primary_name", "")),
+                    category=str(row.get("basic_category", row.get("poi_primary_category", ""))),
+                    brand=str(row.get("brand_name_primary", "") or ""),
+                    lat=float(row["lat"]) if pd.notna(row.get("lat")) else None,
+                    lon=float(row["lon"]) if pd.notna(row.get("lon")) else None,
+                    h3_cell=str(row.get("h3_cell", "")),
+                ))
 
-    competitor_total = 0
-    if pr.competitor_pois is not None and not pr.competitor_pois.empty:
-        competitor_total = len(pr.competitor_pois)
+        competitor_total = 0
+        if pr.competitor_pois is not None and not pr.competitor_pois.empty:
+            competitor_total = len(pr.competitor_pois)
 
-    return GenieDebugOut(
-        brand_pois=brand_rows,
-        total_brand_pois=len(brand_rows),
-        competitor_pois_total=competitor_total,
-    )
+        return GenieDebugOut(
+            brand_pois=brand_rows,
+            total_brand_pois=len(brand_rows),
+            competitor_pois_total=competitor_total,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.exception("genie-debug endpoint failed")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # -- Persist Analysis ---------------------------------------------------------
@@ -721,41 +767,47 @@ async def get_genie_debug(session_id: str):
 )
 async def persist_analysis(session_id: str):
     """Persist the in-memory analysis results to Delta tables."""
-    from fastapi import Request as FastAPIRequest
+    try:
+        pr = _get_result(session_id)
+        from persist import persist_analysis as do_persist
 
-    pr = _get_result(session_id)
-    from persist import persist_analysis as do_persist
+        city_polygon_geojson = _wkt_to_geojson(pr.city_polygon_wkt) if pr.city_polygon_wkt else None
 
-    city_polygon_geojson = _wkt_to_geojson(pr.city_polygon_wkt) if pr.city_polygon_wkt else None
+        if pr.scored.empty:
+            raise HTTPException(status_code=404, detail="No scored hexagons to persist")
+        resolution = h3.get_resolution(_h3_int_to_hex(pr.scored["h3_cell"].iloc[0]))
+        request_data = {
+            "brand_input_mode": "",
+            "brand_input_value": "",
+            "country": "",
+            "city": "",
+            "resolution": resolution,
+            "categories": [],
+            "enable_competition": "opportunity_score" in pr.scored.columns,
+            "beta": 1.0,
+            "include_buildings": True,
+        }
 
-    resolution = h3.get_resolution(_h3_int_to_hex(pr.scored["h3_cell"].iloc[0]))
-    request_data = {
-        "brand_input_mode": "",
-        "brand_input_value": "",
-        "country": "",
-        "city": "",
-        "resolution": resolution,
-        "categories": [],
-        "enable_competition": "opportunity_score" in pr.scored.columns,
-        "beta": 1.0,
-        "include_buildings": True,
-    }
+        center_lat = float(pr.city_h3_cells_df["center_lat"].mean())
+        center_lon = float(pr.city_h3_cells_df["center_lon"].mean())
 
-    center_lat = float(pr.city_h3_cells_df["center_lat"].mean())
-    center_lon = float(pr.city_h3_cells_df["center_lon"].mean())
-
-    result = do_persist(
-        session_id=session_id,
-        request_data=request_data,
-        pipeline_result=pr,
-        city_polygon_geojson=city_polygon_geojson,
-        center_lat=center_lat,
-        center_lon=center_lon,
-    )
-    return PersistResultOut(
-        analysis_id=result["analysis_id"],
-        tables_written=result["tables_written"],
-    )
+        result = do_persist(
+            session_id=session_id,
+            request_data=request_data,
+            pipeline_result=pr,
+            city_polygon_geojson=city_polygon_geojson,
+            center_lat=center_lat,
+            center_lon=center_lon,
+        )
+        return PersistResultOut(
+            analysis_id=result["analysis_id"],
+            tables_written=result["tables_written"],
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.exception("persist endpoint failed")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.post(
@@ -765,37 +817,43 @@ async def persist_analysis(session_id: str):
 )
 async def persist_analysis_with_context(session_id: str, req: AnalyzeRequest):
     """Persist analysis results to Delta, using the original request for metadata."""
-    pr = _get_result(session_id)
-    from persist import persist_analysis as do_persist
+    try:
+        pr = _get_result(session_id)
+        from persist import persist_analysis as do_persist
 
-    city_polygon_geojson = _wkt_to_geojson(pr.city_polygon_wkt) if pr.city_polygon_wkt else None
-    center_lat = float(pr.city_h3_cells_df["center_lat"].mean())
-    center_lon = float(pr.city_h3_cells_df["center_lon"].mean())
+        city_polygon_geojson = _wkt_to_geojson(pr.city_polygon_wkt) if pr.city_polygon_wkt else None
+        center_lat = float(pr.city_h3_cells_df["center_lat"].mean())
+        center_lon = float(pr.city_h3_cells_df["center_lon"].mean())
 
-    request_data = {
-        "brand_input_mode": req.brand_input.mode,
-        "brand_input_value": req.brand_input.value,
-        "country": req.country,
-        "city": req.city,
-        "resolution": req.resolution,
-        "categories": req.categories,
-        "enable_competition": req.enable_competition,
-        "beta": req.beta,
-        "include_buildings": req.include_buildings,
-    }
+        request_data = {
+            "brand_input_mode": req.brand_input.mode,
+            "brand_input_value": req.brand_input.value,
+            "country": req.country,
+            "city": req.city,
+            "resolution": req.resolution,
+            "categories": req.categories,
+            "enable_competition": req.enable_competition,
+            "beta": req.beta,
+            "include_buildings": req.include_buildings,
+        }
 
-    result = do_persist(
-        session_id=session_id,
-        request_data=request_data,
-        pipeline_result=pr,
-        city_polygon_geojson=city_polygon_geojson,
-        center_lat=center_lat,
-        center_lon=center_lon,
-    )
-    return PersistResultOut(
-        analysis_id=result["analysis_id"],
-        tables_written=result["tables_written"],
-    )
+        result = do_persist(
+            session_id=session_id,
+            request_data=request_data,
+            pipeline_result=pr,
+            city_polygon_geojson=city_polygon_geojson,
+            center_lat=center_lat,
+            center_lon=center_lon,
+        )
+        return PersistResultOut(
+            analysis_id=result["analysis_id"],
+            tables_written=result["tables_written"],
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.exception("persist-with-context endpoint failed")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # -- Assets -------------------------------------------------------------------
@@ -803,80 +861,86 @@ async def persist_analysis_with_context(session_id: str, req: AnalyzeRequest):
 @router.get("/assets", response_model=AssetsOut, operation_id="getAssets")
 async def get_assets():
     """Return links to all Databricks assets produced by this accelerator."""
-    import os
-    from config import (
-        GENIE_SPACE_ID,
-        GOLD_CITIES_TABLE,
-        GOLD_PLACES_TABLE,
-        GOLD_PLACES_ENRICHED,
-        GOLD_BUILDINGS_TABLE,
-        ANALYSES_TABLE,
-        ANALYSIS_BRAND_PROFILES_TABLE,
-        ANALYSIS_HEXAGONS_TABLE,
-        ANALYSIS_FINGERPRINTS_TABLE,
-        ANALYSIS_COMPETITORS_TABLE,
-        HEX2VEC_VOLUME_PATH,
-    )
-    from persist import list_analyses
+    try:
+        import os
+        from config import (
+            GENIE_SPACE_ID,
+            GOLD_CITIES_TABLE,
+            GOLD_PLACES_TABLE,
+            GOLD_PLACES_ENRICHED,
+            GOLD_BUILDINGS_TABLE,
+            ANALYSES_TABLE,
+            ANALYSIS_BRAND_PROFILES_TABLE,
+            ANALYSIS_HEXAGONS_TABLE,
+            ANALYSIS_FINGERPRINTS_TABLE,
+            ANALYSIS_COMPETITORS_TABLE,
+            HEX2VEC_VOLUME_PATH,
+        )
+        from persist import list_analyses
 
-    host = os.getenv("DATABRICKS_HOST", "")
-    if host and not host.startswith("https://"):
-        host = f"https://{host}"
-    host = host.rstrip("/")
+        host = os.getenv("DATABRICKS_HOST", "")
+        if host and not host.startswith("https://"):
+            host = f"https://{host}"
+        host = host.rstrip("/")
 
-    links: list[AssetLink] = []
+        links: list[AssetLink] = []
 
-    if host:
-        links.append(AssetLink(name="Databricks Workspace", url=host, asset_type="workspace"))
+        if host:
+            links.append(AssetLink(name="Databricks Workspace", url=host, asset_type="workspace"))
 
-    if GENIE_SPACE_ID:
+        if GENIE_SPACE_ID:
+            links.append(AssetLink(
+                name="Genie Space (Brand Explorer)",
+                url=f"{host}/genie/rooms/{GENIE_SPACE_ID}" if host else "",
+                asset_type="genie",
+            ))
+
         links.append(AssetLink(
-            name="Genie Space (Brand Explorer)",
-            url=f"{host}/genie/rooms/{GENIE_SPACE_ID}" if host else "",
-            asset_type="genie",
+            name="Hex2Vec Pretrained Model",
+            url=f"{host}/explore/data/volumes{HEX2VEC_VOLUME_PATH}" if host else HEX2VEC_VOLUME_PATH,
+            asset_type="volume",
         ))
 
-    links.append(AssetLink(
-        name="Hex2Vec Pretrained Model",
-        url=f"{host}/explore/data/volumes{HEX2VEC_VOLUME_PATH}" if host else HEX2VEC_VOLUME_PATH,
-        asset_type="volume",
-    ))
+        gold_tables = [
+            ("Gold Cities", GOLD_CITIES_TABLE),
+            ("Gold Places", GOLD_PLACES_TABLE),
+            ("Gold Places Enriched", GOLD_PLACES_ENRICHED),
+            ("Gold Buildings", GOLD_BUILDINGS_TABLE),
+        ]
+        analysis_tables = [
+            ("Analyses Registry", ANALYSES_TABLE),
+            ("Analysis Brand Profiles", ANALYSIS_BRAND_PROFILES_TABLE),
+            ("Analysis Hexagons", ANALYSIS_HEXAGONS_TABLE),
+            ("Analysis Fingerprints", ANALYSIS_FINGERPRINTS_TABLE),
+            ("Analysis Competitors", ANALYSIS_COMPETITORS_TABLE),
+        ]
+        for label, fqn in gold_tables + analysis_tables:
+            parts = fqn.split(".")
+            table_url = f"{host}/explore/data/{'/'.join(parts)}" if host and len(parts) == 3 else ""
+            links.append(AssetLink(name=label, url=table_url, asset_type="table"))
 
-    gold_tables = [
-        ("Gold Cities", GOLD_CITIES_TABLE),
-        ("Gold Places", GOLD_PLACES_TABLE),
-        ("Gold Places Enriched", GOLD_PLACES_ENRICHED),
-        ("Gold Buildings", GOLD_BUILDINGS_TABLE),
-    ]
-    analysis_tables = [
-        ("Analyses Registry", ANALYSES_TABLE),
-        ("Analysis Brand Profiles", ANALYSIS_BRAND_PROFILES_TABLE),
-        ("Analysis Hexagons", ANALYSIS_HEXAGONS_TABLE),
-        ("Analysis Fingerprints", ANALYSIS_FINGERPRINTS_TABLE),
-        ("Analysis Competitors", ANALYSIS_COMPETITORS_TABLE),
-    ]
-    for label, fqn in gold_tables + analysis_tables:
-        parts = fqn.split(".")
-        table_url = f"{host}/explore/data/{'/'.join(parts)}" if host and len(parts) == 3 else ""
-        links.append(AssetLink(name=label, url=table_url, asset_type="table"))
+        recent = list_analyses(limit=10)
+        analyses = [
+            AnalysisSummary(
+                analysis_id=str(r.get("analysis_id", "")),
+                brand_input_value=str(r.get("brand_input_value", "")),
+                city=str(r.get("city", "")),
+                country=str(r.get("country", "")),
+                created_at=str(r.get("created_at", "")),
+            )
+            for r in recent
+        ]
 
-    recent = list_analyses(limit=10)
-    analyses = [
-        AnalysisSummary(
-            analysis_id=str(r.get("analysis_id", "")),
-            brand_input_value=str(r.get("brand_input_value", "")),
-            city=str(r.get("city", "")),
-            country=str(r.get("country", "")),
-            created_at=str(r.get("created_at", "")),
+        return AssetsOut(
+            workspace_url=host,
+            links=links,
+            recent_analyses=analyses,
         )
-        for r in recent
-    ]
-
-    return AssetsOut(
-        workspace_url=host,
-        links=links,
-        recent_analyses=analyses,
-    )
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.exception("assets endpoint failed")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # -- Internal helpers ---------------------------------------------------------

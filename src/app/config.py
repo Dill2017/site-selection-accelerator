@@ -3,8 +3,24 @@
 import logging
 import os
 
+_log = logging.getLogger(__name__)
+
 _CATALOG = os.getenv("GOLD_CATALOG", "")
 _SCHEMA = os.getenv("GOLD_SCHEMA", "")
+
+if not _CATALOG or _CATALOG == "CHANGE_ME":
+    raise RuntimeError(
+        "GOLD_CATALOG is not configured. "
+        "Set it in packages/app/app.yml (for deployed apps) or in your "
+        "local .env file. It must match the 'catalog' variable in databricks.yml."
+    )
+
+if not _SCHEMA or _SCHEMA == "CHANGE_ME":
+    raise RuntimeError(
+        "GOLD_SCHEMA is not configured. "
+        "Set it in packages/app/app.yml (for deployed apps) or in your "
+        "local .env file. It must match the 'schema' variable in databricks.yml."
+    )
 
 GOLD_CITIES_TABLE = f"{_CATALOG}.{_SCHEMA}.gold_cities"
 GOLD_PLACES_TABLE = f"{_CATALOG}.{_SCHEMA}.gold_places"
@@ -18,33 +34,53 @@ ANALYSIS_HEXAGONS_TABLE = f"{_CATALOG}.{_SCHEMA}.analysis_hexagons"
 ANALYSIS_FINGERPRINTS_TABLE = f"{_CATALOG}.{_SCHEMA}.analysis_fingerprints"
 ANALYSIS_COMPETITORS_TABLE = f"{_CATALOG}.{_SCHEMA}.analysis_competitors"
 
-_log = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Genie Space ID — resolved lazily on first access to avoid DB calls at
+# import time that fail when the database isn't reachable yet.
+# ---------------------------------------------------------------------------
+
+class _LazyGenieSpaceId:
+    """Descriptor that resolves the Genie Space ID on first read."""
+
+    def __init__(self):
+        self._value: str | None = None
+
+    def _resolve(self) -> str:
+        from_env = os.getenv("GENIE_SPACE_ID", "")
+        if from_env:
+            return from_env
+        try:
+            from db import execute_query
+
+            df = execute_query(
+                f"SELECT config_value FROM {APP_CONFIG_TABLE} "
+                f"WHERE config_key = 'GENIE_SPACE_ID' LIMIT 1"
+            )
+            if not df.empty:
+                val = str(df.iloc[0]["config_value"])
+                _log.info("Loaded GENIE_SPACE_ID from app_config table: %s", val)
+                return val
+        except Exception as e:
+            _log.warning("Could not read GENIE_SPACE_ID from app_config: %s", e)
+        return ""
+
+    def __str__(self) -> str:
+        if self._value is None:
+            self._value = self._resolve()
+        return self._value
+
+    def __bool__(self) -> bool:
+        return bool(str(self))
+
+    def __eq__(self, other):
+        return str(self) == str(other)
+
+    def __hash__(self):
+        return hash(str(self))
 
 
-def _resolve_genie_space_id() -> str:
-    """Read GENIE_SPACE_ID from env, falling back to the app_config table."""
-    from_env = os.getenv("GENIE_SPACE_ID", "")
-    if from_env:
-        return from_env
-
-    try:
-        from db import execute_query
-
-        df = execute_query(
-            f"SELECT config_value FROM {APP_CONFIG_TABLE} "
-            f"WHERE config_key = 'GENIE_SPACE_ID' LIMIT 1"
-        )
-        if not df.empty:
-            val = str(df.iloc[0]["config_value"])
-            _log.info("Loaded GENIE_SPACE_ID from app_config table: %s", val)
-            return val
-    except Exception as e:
-        _log.warning("Could not read GENIE_SPACE_ID from app_config: %s", e)
-
-    return ""
-
-
-GENIE_SPACE_ID: str = _resolve_genie_space_id()
+GENIE_SPACE_ID: str = _LazyGenieSpaceId()  # type: ignore[assignment]
 
 CATEGORY_GROUPS: dict[str, list[str]] = {
     "Food & Drink": [

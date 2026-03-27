@@ -32,17 +32,28 @@ export function BrandProfileDialog({
 }: BrandProfileDialogProps) {
   const [profile, setProfile] = useState<BrandProfile | null>(null);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!open || !sessionId) return;
     setLoading(true);
+    setError(null);
     fetch(`/api/results/${sessionId}/brand-profile`)
-      .then((r) => r.json())
+      .then(async (r) => {
+        if (!r.ok) {
+          const detail = await r.text().catch(() => "");
+          throw new Error(`Failed to load profile (${r.status})${detail ? `: ${detail}` : ""}`);
+        }
+        return r.json();
+      })
       .then((data: BrandProfile) => {
         setProfile(data);
         setLoading(false);
       })
-      .catch(() => setLoading(false));
+      .catch((err) => {
+        setError(err instanceof Error ? err.message : "Failed to load brand profile");
+        setLoading(false);
+      });
   }, [open, sessionId]);
 
   return (
@@ -57,6 +68,8 @@ export function BrandProfileDialog({
             <Skeleton className="h-48 w-full" />
             <Skeleton className="h-48 w-full" />
           </div>
+        ) : error ? (
+          <p className="text-sm text-destructive p-4">{error}</p>
         ) : profile ? (
           <Tabs defaultValue="average" className="flex-1 overflow-hidden flex flex-col">
             <TabsList className="shrink-0">

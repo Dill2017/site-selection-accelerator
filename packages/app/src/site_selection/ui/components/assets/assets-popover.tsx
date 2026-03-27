@@ -51,16 +51,20 @@ export function AssetsPopover() {
   const [open, setOpen] = useState(false);
   const [assets, setAssets] = useState<AssetsData | null>(null);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const fetchAssets = useCallback(async () => {
     setLoading(true);
+    setError(null);
     try {
       const res = await fetch("/api/assets");
-      if (res.ok) {
-        setAssets(await res.json());
+      if (!res.ok) {
+        const detail = await res.text().catch(() => "");
+        throw new Error(`Failed to load assets (${res.status})${detail ? `: ${detail}` : ""}`);
       }
-    } catch {
-      // silently fail
+      setAssets(await res.json());
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to load assets");
     } finally {
       setLoading(false);
     }
@@ -105,7 +109,13 @@ export function AssetsPopover() {
               </p>
             )}
 
-            {!loading && assets && (
+            {!loading && error && (
+              <p className="text-sm text-destructive text-center py-4">
+                {error}
+              </p>
+            )}
+
+            {!loading && !error && assets && (
               <>
                 {workspaceLinks.length > 0 && (
                   <div>

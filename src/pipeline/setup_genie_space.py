@@ -320,6 +320,49 @@ def _grant_app_sp_access(w: WorkspaceClient, space_id: str, app_name: str = "sit
         log.warning("Could not grant SP access to Genie Space: %s", e)
 
 
+def _grant_app_sp_schema_access(
+    w: WorkspaceClient,
+    catalog: str,
+    schema: str,
+    warehouse_id: str,
+    app_name: str = "site-selection-accelerator",
+) -> None:
+    """Grant the app service principal USE CATALOG, USE SCHEMA, and SELECT on the schema."""
+    from databricks.sdk.service.sql import StatementState
+
+    try:
+        app = w.apps.get(app_name)
+        sp_id = app.service_principal_id
+        if not sp_id:
+            log.warning("App %s has no service_principal_id — skipping schema grants", app_name)
+            return
+
+        sps = list(w.service_principals.list(filter=f"id eq {sp_id}"))
+        if not sps:
+            log.warning("Could not resolve service principal %s", sp_id)
+            return
+        sp_display_name = sps[0].display_name
+
+        grants = [
+            f"GRANT USE CATALOG ON CATALOG `{catalog}` TO `{sp_display_name}`",
+            f"GRANT USE SCHEMA ON SCHEMA `{catalog}`.`{schema}` TO `{sp_display_name}`",
+            f"GRANT SELECT ON SCHEMA `{catalog}`.`{schema}` TO `{sp_display_name}`",
+            f"GRANT MODIFY ON SCHEMA `{catalog}`.`{schema}` TO `{sp_display_name}`",
+        ]
+        for stmt in grants:
+            resp = w.statement_execution.execute_statement(
+                warehouse_id=warehouse_id,
+                statement=stmt,
+            )
+            if resp.status and resp.status.state == StatementState.FAILED:
+                err_msg = resp.status.error.message if resp.status.error else "unknown"
+                log.warning("Grant failed: %s — %s", stmt, err_msg)
+            else:
+                log.info("Executed: %s", stmt)
+    except Exception as e:
+        log.warning("Could not grant schema access to app SP: %s", e)
+
+
 def main(catalog: str, schema: str, warehouse_id: str) -> str:
     """Ensure the Genie Space exists, update instructions, and return its ID."""
     w = WorkspaceClient()
@@ -331,6 +374,7 @@ def main(catalog: str, schema: str, warehouse_id: str) -> str:
         space_id = _create_space(w, catalog, schema, warehouse_id)
 
     _grant_app_sp_access(w, space_id)
+    _grant_app_sp_schema_access(w, catalog, schema, warehouse_id)
     _persist_space_id(w, catalog, schema, space_id, warehouse_id)
     return space_id
 

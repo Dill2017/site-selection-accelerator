@@ -21,6 +21,7 @@ resources:
             parameters:
               catalog: ${var.catalog}
               schema: ${var.schema}
+              carto_divisions_catalog: ${var.carto_divisions_catalog}
         - task_key: "create_gold_places"
           depends_on:
             - task_key: "setup_schema"
@@ -31,6 +32,7 @@ resources:
             parameters:
               catalog: ${var.catalog}
               schema: ${var.schema}
+              carto_places_catalog: ${var.carto_places_catalog}
         - task_key: "create_gold_buildings"
           depends_on:
             - task_key: "setup_schema"
@@ -41,6 +43,7 @@ resources:
             parameters:
               catalog: ${var.catalog}
               schema: ${var.schema}
+              carto_buildings_catalog: ${var.carto_buildings_catalog}
         - task_key: "create_gold_places_enriched"
           depends_on:
             - task_key: "setup_schema"
@@ -51,6 +54,7 @@ resources:
             parameters:
               catalog: ${var.catalog}
               schema: ${var.schema}
+              carto_places_catalog: ${var.carto_places_catalog}
         - task_key: "create_analysis_tables"
           depends_on:
             - task_key: "setup_schema"

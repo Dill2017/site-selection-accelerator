@@ -27,5 +27,5 @@ SELECT
     CAST(p.bbox.xmax AS DOUBLE)                         AS bbox_xmax,
     CAST(p.bbox.ymin AS DOUBLE)                         AS bbox_ymin,
     CAST(p.bbox.ymax AS DOUBLE)                         AS bbox_ymax
-FROM carto_overture_maps_places.carto.place p
+FROM IDENTIFIER({{carto_places_catalog}} || '.carto.place') p
 WHERE p.categories.primary IS NOT NULL

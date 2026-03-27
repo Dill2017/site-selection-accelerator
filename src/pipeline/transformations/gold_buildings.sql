@@ -28,7 +28,7 @@ SELECT
     CAST(b.bbox.xmax AS DOUBLE)                                 AS bbox_xmax,
     CAST(b.bbox.ymin AS DOUBLE)                                 AS bbox_ymin,
     CAST(b.bbox.ymax AS DOUBLE)                                 AS bbox_ymax
-FROM carto_overture_maps_buildings.carto.building b
+FROM IDENTIFIER({{carto_buildings_catalog}} || '.carto.building') b
 WHERE b.subtype IS NOT NULL OR b.class IS NOT NULL;
 
 OPTIMIZE IDENTIFIER({{catalog}} || '.' || {{schema}} || '.gold_buildings')

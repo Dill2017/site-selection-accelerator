@@ -18,23 +18,55 @@ log = logging.getLogger(__name__)
 
 WAREHOUSE_ID = os.getenv("DATABRICKS_WAREHOUSE_ID")
 
+_MAX_POLL_ITERATIONS = 150  # ~5 min at 2 s intervals
+
 _client: WorkspaceClient | None = None
 
 
 def _get_client() -> WorkspaceClient:
+    """Return a cached WorkspaceClient.
+
+    Strategy:
+      1. If DATABRICKS_CONFIG_PROFILE is explicitly set, use that profile
+         (local-dev scenario).
+      2. Otherwise call WorkspaceClient() with no args — the SDK auto-detects
+         the correct auth in every Databricks-managed environment (Apps, Jobs,
+         Notebooks) as well as when DATABRICKS_HOST + PAT are set in env.
+    """
     global _client
-    if _client is None:
-        if os.environ.get("DATABRICKS_RUNTIME_VERSION") or os.environ.get("IS_DATABRICKS_APP"):
-            _client = WorkspaceClient()
+    if _client is not None:
+        return _client
+
+    profile = os.environ.get("DATABRICKS_CONFIG_PROFILE")
+    try:
+        if profile:
+            _client = WorkspaceClient(profile=profile)
         else:
-            _client = WorkspaceClient(profile="DEFAULT")
-        log.info("Initialised WorkspaceClient (warehouse=%s)", WAREHOUSE_ID)
+            _client = WorkspaceClient()
+    except Exception as exc:
+        raise RuntimeError(
+            f"Failed to initialise WorkspaceClient: {exc}. "
+            "Ensure DATABRICKS_HOST and authentication are configured "
+            "(or set DATABRICKS_CONFIG_PROFILE for local development)."
+        ) from exc
+
+    log.info("Initialised WorkspaceClient (warehouse=%s)", WAREHOUSE_ID)
     return _client
 
 
+def _validate_warehouse_id() -> str:
+    if not WAREHOUSE_ID:
+        raise RuntimeError(
+            "DATABRICKS_WAREHOUSE_ID is not set. "
+            "Ensure the environment variable is configured in app.yml "
+            "(via the sql-warehouse resource) or in your local .env file."
+        )
+    return WAREHOUSE_ID
+
+
 def _wait_for_statement(client: WorkspaceClient, statement_id: str):
-    """Poll until the statement finishes executing."""
-    while True:
+    """Poll until the statement finishes executing (max ~5 min)."""
+    for _ in range(_MAX_POLL_ITERATIONS):
         resp = client.statement_execution.get_statement(statement_id)
         state = resp.status.state
         if state in (StatementState.SUCCEEDED, StatementState.FAILED,
@@ -42,6 +74,11 @@ def _wait_for_statement(client: WorkspaceClient, statement_id: str):
             return resp
         log.debug("Statement %s state=%s, polling…", statement_id, state)
         time.sleep(2)
+
+    raise RuntimeError(
+        f"Statement {statement_id} did not complete within "
+        f"{_MAX_POLL_ITERATIONS * 2}s — possible warehouse timeout."
+    )
 
 
 def _cast_columns(df: pd.DataFrame, col_schemas: list) -> pd.DataFrame:
@@ -74,11 +111,12 @@ def execute_query(query: str) -> pd.DataFrame:
     Handles long-running queries by polling. Uses INLINE disposition
     with maximum byte limit. Fetches all chunks for paginated results.
     """
+    wh_id = _validate_warehouse_id()
     client = _get_client()
 
     resp = client.statement_execution.execute_statement(
         statement=query,
-        warehouse_id=WAREHOUSE_ID,
+        warehouse_id=wh_id,
         wait_timeout="50s",
         disposition=Disposition.INLINE,
         format=Format.JSON_ARRAY,

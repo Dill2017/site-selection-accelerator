@@ -9,7 +9,7 @@ WITH localities AS (
         d.country,
         d.names.primary  AS city_name,
         d.bbox
-    FROM carto_overture_maps_divisions.carto.division d
+    FROM IDENTIFIER({{carto_divisions_catalog}} || '.carto.division') d
     WHERE d.subtype = 'locality'
         AND d.class IN ('city', 'town')
         AND d.country IS NOT NULL
@@ -18,7 +18,7 @@ WITH localities AS (
 locality_area AS (
     SELECT l.id, FIRST(da.geom) AS geom
     FROM localities l
-    INNER JOIN carto_overture_maps_divisions.carto.division_area da
+    INNER JOIN IDENTIFIER({{carto_divisions_catalog}} || '.carto.division_area') da
         ON da.division_id = l.id
     GROUP BY l.id
 ),
@@ -42,9 +42,9 @@ fallback_area AS (
             acc -> acc
         ) AS geom
     FROM cities_needing_fallback cn
-    INNER JOIN carto_overture_maps_divisions.carto.division d
+    INNER JOIN IDENTIFIER({{carto_divisions_catalog}} || '.carto.division') d
         ON d.names.primary = cn.city_name AND d.country = cn.country
-    INNER JOIN carto_overture_maps_divisions.carto.division_area da
+    INNER JOIN IDENTIFIER({{carto_divisions_catalog}} || '.carto.division_area') da
         ON da.division_id = d.id
     WHERE d.subtype IN ('region', 'county', 'neighborhood', 'macrohood')
     GROUP BY cn.city_name, cn.country

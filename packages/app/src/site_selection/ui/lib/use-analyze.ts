@@ -33,7 +33,15 @@ export function useAnalyze() {
       });
 
       if (!response.ok || !response.body) {
-        setState((s) => ({ ...s, isRunning: false, error: "Failed to start analysis" }));
+        let detail = "Failed to start analysis";
+        try {
+          const body = await response.json();
+          if (body?.detail) detail = String(body.detail);
+        } catch {
+          const text = await response.text().catch(() => "");
+          if (text) detail = text;
+        }
+        setState((s) => ({ ...s, isRunning: false, error: `${detail} (${response.status})` }));
         return;
       }
 

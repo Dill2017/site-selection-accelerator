@@ -106,8 +106,11 @@ export function ConfigSidebar({
 
   useEffect(() => {
     fetch("/api/config")
-      .then((r) => {
-        if (!r.ok) throw new Error(`Config API: ${r.status}`);
+      .then(async (r) => {
+        if (!r.ok) {
+          const detail = await r.text().catch(() => "");
+          throw new Error(`Config API: ${r.status}${detail ? ` — ${detail}` : ""}`);
+        }
         return r.json();
       })
       .then((data: AppConfig) => {
@@ -118,8 +121,11 @@ export function ConfigSidebar({
       })
       .catch((e) => setLoadError((prev) => prev ? `${prev}; ${e.message}` : e.message));
     fetch("/api/countries")
-      .then((r) => {
-        if (!r.ok) throw new Error(`Countries API: ${r.status}`);
+      .then(async (r) => {
+        if (!r.ok) {
+          const detail = await r.text().catch(() => "");
+          throw new Error(`Countries API: ${r.status}${detail ? ` — ${detail}` : ""}`);
+        }
         return r.json();
       })
       .then((data: string[]) => {
@@ -133,8 +139,11 @@ export function ConfigSidebar({
   useEffect(() => {
     if (!country) return;
     fetch(`/api/cities?country=${encodeURIComponent(country)}`)
-      .then((r) => {
-        if (!r.ok) throw new Error(`Cities API: ${r.status}`);
+      .then(async (r) => {
+        if (!r.ok) {
+          const detail = await r.text().catch(() => "");
+          throw new Error(`Cities API: ${r.status}${detail ? ` — ${detail}` : ""}`);
+        }
         return r.json();
       })
       .then((data: string[]) => {
@@ -192,8 +201,10 @@ export function ConfigSidebar({
       setResolvedAddresses(data.results);
       setResolvedFor(text);
       setSelectedPoiIds(new Set());
-    } catch {
-      // silent — user will see no disambiguation panel
+    } catch (err) {
+      toast.error("Address resolution failed", {
+        description: err instanceof Error ? err.message : "Could not reach the server",
+      });
     } finally {
       setIsResolving(false);
     }

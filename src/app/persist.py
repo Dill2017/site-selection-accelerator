@@ -93,7 +93,12 @@ def ensure_analysis_tables() -> None:
         try:
             execute_query(ddl)
         except Exception as e:
-            log.warning("DDL execution warning: %s", e)
+            log.error("DDL execution failed — tables may be missing: %s", e)
+            raise RuntimeError(
+                f"Failed to create analysis tables: {e}. "
+                "Check that the catalog/schema exist and the app service principal "
+                "has CREATE TABLE permission."
+            ) from e
 
     _tables_ensured = True
     log.info("Analysis tables ensured")
@@ -143,25 +148,41 @@ def persist_analysis(
     analysis_id = str(uuid.uuid4())
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
+    tables_written: list[str] = []
+
     _persist_analyses_row(analysis_id, session_id, request_data,
                           city_polygon_geojson, center_lat, center_lon,
                           now, user_identity)
+    tables_written.append(ANALYSES_TABLE)
 
-    _persist_brand_profile(analysis_id, pipeline_result)
-    _persist_hexagons(analysis_id, pipeline_result)
-    _persist_competitors(analysis_id, pipeline_result)
-    _persist_fingerprints(analysis_id, pipeline_result, top_n_fingerprints)
+    try:
+        _persist_brand_profile(analysis_id, pipeline_result)
+        tables_written.append(ANALYSIS_BRAND_PROFILES_TABLE)
+    except Exception as e:
+        log.error("Failed to persist brand profiles: %s", e)
+
+    try:
+        _persist_hexagons(analysis_id, pipeline_result)
+        tables_written.append(ANALYSIS_HEXAGONS_TABLE)
+    except Exception as e:
+        log.error("Failed to persist hexagons: %s", e)
+
+    try:
+        _persist_competitors(analysis_id, pipeline_result)
+        tables_written.append(ANALYSIS_COMPETITORS_TABLE)
+    except Exception as e:
+        log.error("Failed to persist competitors: %s", e)
+
+    try:
+        _persist_fingerprints(analysis_id, pipeline_result, top_n_fingerprints)
+        tables_written.append(ANALYSIS_FINGERPRINTS_TABLE)
+    except Exception as e:
+        log.error("Failed to persist fingerprints: %s", e)
 
     log.info("Persisted analysis %s for session %s", analysis_id, session_id)
     return {
         "analysis_id": analysis_id,
-        "tables_written": [
-            ANALYSES_TABLE,
-            ANALYSIS_BRAND_PROFILES_TABLE,
-            ANALYSIS_HEXAGONS_TABLE,
-            ANALYSIS_FINGERPRINTS_TABLE,
-            ANALYSIS_COMPETITORS_TABLE,
-        ],
+        "tables_written": tables_written,
     }
 
 
