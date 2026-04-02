@@ -1,16 +1,13 @@
 # Opportunity Score Explainer
 
 The opportunity score ranks every H3 hexagonal cell in a target city by how
-well it matches a brand's ideal location profile, adjusted for local demand
-and competitive landscape.
+well it matches a brand's ideal location profile, adjusted for the
+competitive landscape.
 
 ```
-raw = similarity × demand_boost × competition_factor
+raw               = similarity × (1 − β × competition_score)
 opportunity_score = percentile_rank(raw)
 ```
-
-A score of **95%** means the cell ranks higher than 95% of all candidate cells
-in the analysis.
 
 ---
 
@@ -36,59 +33,29 @@ similar to the brand's average location.
 
 ---
 
-## 2. Demand Boost
-
-**What it measures:** how commercially active an area is, based on the
-density of Points of Interest and buildings.
-
-```
-demand_score = percentile_rank(poi_density)
-demand_boost = 1 + α × demand_score
-```
-
-- **`poi_density`** — total count of POI and building features in the cell.
-  This includes all selected POI categories (restaurants, shops, services,
-  etc.) and building features (residential, commercial, height profile) when
-  buildings are enabled.
-- **`demand_score`** — percentile rank of `poi_density` across all cells.
-  A cell at the 90th percentile has more activity than 90% of cells.
-- **`α` (alpha)** — user-controlled via the **Demand boost (α)** slider.
-
-| α value | Effect | demand_boost range |
-|---------|--------|-------------------|
-| 0.0 | Demand ignored | Always 1.0 |
-| 0.5 (default) | Moderate boost | 1.0 – 1.5 |
-| 1.0 | Full boost | 1.0 – 2.0 |
-
-**Why it matters:** Two cells may have identical similarity scores, but a
-cell in a busy commercial district with hundreds of POIs is a stronger
-opportunity than one in a quiet residential area with only a handful.
-
----
-
-## 3. Competition Factor
+## 2. Competition Factor
 
 **What it measures:** the presence of a specific competitor brand (e.g.
 "Subway") in each cell and its neighbours.
 
 ```
-competition_score = min(competitor_count / median(nonzero_counts), 1.0)
+competition_score = min(competitor_count / max(nonzero_counts), 1.0)
 competition_factor = 1 − β × competition_score
 ```
 
 ### Competition score normalisation
 
-Competitor counts are normalised by the **median** of cells that have at
-least one competitor — not the maximum. This is **outlier-resistant**: if
-one cell happens to have 4 Subway locations while most cells have 1–2, it
-does not compress every other cell's score.
+Competitor counts are normalised by the **maximum** non-zero count across
+all cells. The most saturated cell gets `competition_score = 1.0`; cells
+with fewer competitors are penalised proportionally less. This avoids
+over-penalising cells when most competitor cells only have 1 location.
 
-| Competitor count | Median = 2 | Score |
-|-----------------|-----------|-------|
+| Competitor count | Max = 4 | Score |
+|-----------------|---------|-------|
 | 0 | — | 0.0 |
-| 1 | 1 / 2 | 0.5 |
-| 2 | 2 / 2 | 1.0 |
-| 4 (outlier) | 4 / 2, clipped | 1.0 |
+| 1 | 1 / 4 | 0.25 |
+| 2 | 2 / 4 | 0.5 |
+| 4 (max) | 4 / 4 | 1.0 |
 
 ### β (beta) — competition strategy
 
@@ -120,35 +87,13 @@ as the brand, not a specific competitor name.
 
 ---
 
-## 4. Final Normalisation — Percentile Rank
+## 3. Interpretation
 
-The raw composite score (`similarity × demand_boost × competition_factor`)
-is converted to a **percentile rank** across all candidate cells.
-
-### Why percentile rank?
-
-| Method | Problem |
-|--------|---------|
-| **Min-max** | A single outlier cell stretches the range, compressing all other scores into a narrow band (e.g. everything between 50–60%) |
-| **Percentile rank** | Distribution-aware — scores spread naturally across the full 0–100% range regardless of outliers |
-
-### Interpretation
-
-| Score | Meaning |
-|-------|---------|
-| 95–100% | Top-tier opportunity — among the best-matched, highest-demand, optimally-positioned cells |
-| 80–95% | Strong opportunity |
-| 50–80% | Above average |
-| 20–50% | Below average |
-| 0–20% | Poor match, low demand, or heavy competition (depending on β) |
-
----
-
-## 5. Tiebreaking
-
-When multiple cells share the same opportunity score, **`poi_density`** is
-used as a secondary sort key. Denser areas rank higher among equally-scored
-cells.
+| Score range | Meaning |
+|-------------|---------|
+| High | Strong neighbourhood match with favourable competitive position |
+| Medium | Decent match or good match offset by competition |
+| Low | Poor neighbourhood match, or heavy competition (depending on β) |
 
 ---
 
@@ -166,21 +111,12 @@ cells.
                │    (0 – 1)      │
                └────────┬────────┘
                         │
-                        × ──── demand_boost = 1 + α × percentile(poi_density)
-                        │
-                        × ──── competition_factor = 1 − β × min(count/median, 1)
+                        × ──── (1 − β × min(count/max, 1))
                         │
                         ▼
                ┌─────────────────┐
-               │   Raw Score     │
-               └────────┬────────┘
-                        │
-                  percentile_rank
-                        │
-                        ▼
-               ┌─────────────────┐
-               │  Opportunity    │  "better than X% of all cells"
-               │  Score (0–100%) │
+               │  Opportunity    │
+               │  Score          │
                └─────────────────┘
 ```
 

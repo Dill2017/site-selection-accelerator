@@ -372,7 +372,7 @@ function TooltipContent({
   existingCount?: number;
 }) {
   const isExistingCell = Boolean(hex.is_brand_cell);
-  const hasPoiCount = Number.isFinite(hex.poi_count);
+  const hasPoiDensity = Number.isFinite(hex.poi_density);
   const hasSimilarity = Number.isFinite(hex.similarity);
   const opportunityScore =
     typeof hex.opportunity_score === "number" ? hex.opportunity_score : null;
@@ -387,31 +387,25 @@ function TooltipContent({
           <>
             <span className="text-muted-foreground">Existing locations</span>
             <span className="font-medium">{existingCount ?? 0}</span>
-            {hasPoiCount && (
+            {hasPoiDensity && (
               <>
-                <span className="text-muted-foreground">POI Count</span>
-                <span className="font-medium">{hex.poi_count}</span>
+                <span className="text-muted-foreground">POI Density</span>
+                <span className="font-medium">{hex.poi_density}</span>
               </>
             )}
           </>
         ) : (
           <>
-            {hasCompetition && hasOpportunity && (
-              <>
-                <span className="text-muted-foreground">Opportunity</span>
-                <span className="font-medium">{(opportunityScore * 100).toFixed(1)}%</span>
-              </>
-            )}
             {hasSimilarity && (
               <>
                 <span className="text-muted-foreground">Similarity</span>
                 <span className="font-medium">{(hex.similarity * 100).toFixed(1)}%</span>
               </>
             )}
-            {hasPoiCount && (
+            {hasPoiDensity && (
               <>
-                <span className="text-muted-foreground">POI Count</span>
-                <span className="font-medium">{hex.poi_count}</span>
+                <span className="text-muted-foreground">POI Density</span>
+                <span className="font-medium">{hex.poi_density}</span>
               </>
             )}
             {hasCompetition && (hex.competitor_count ?? 0) > 0 && (

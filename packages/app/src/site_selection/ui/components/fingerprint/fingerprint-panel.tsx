@@ -111,22 +111,12 @@ export function FingerprintPanel({
               <Badge variant="outline" className="text-xs">
                 Similarity: {(detail.similarity * 100).toFixed(1)}%
               </Badge>
-              {detail.opportunity_score != null && (
-                <Badge variant="outline" className="text-xs">
-                  Opportunity: {(detail.opportunity_score * 100).toFixed(1)}%
-                </Badge>
-              )}
               <Badge variant="secondary" className="text-xs">
-                POIs: {detail.poi_count}
+                POI Density: {detail.poi_density}
               </Badge>
               {detail.competition && detail.competition.competitor_count > 0 && (
                 <Badge variant="secondary" className="text-xs">
                   Competition: {detail.competition.competitor_count}
-                </Badge>
-              )}
-              {detail.competition && detail.competition.demand_score != null && (
-                <Badge variant="secondary" className="text-xs">
-                  Demand: {(detail.competition.demand_score * 100).toFixed(0)}%
                 </Badge>
               )}
             </div>

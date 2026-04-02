@@ -47,7 +47,6 @@ export interface AnalyzeRequest {
   brand_input: BrandInput;
   enable_competition: boolean;
   beta: number;
-  alpha: number;
   competitor_brand: string;
   include_buildings: boolean;
 }
@@ -61,7 +60,7 @@ export interface HexagonData {
   lat: number;
   lon: number;
   address: string;
-  poi_count: number;
+  poi_density: number;
   competitor_count: number;
   top_competitors: string;
   cat_detail: string;
@@ -149,8 +148,6 @@ export interface CompetitionInfo {
   vibe_score: number;
   competitor_count: number;
   competition_score: number;
-  demand_score: number;
-  poi_density: number;
   opportunity_score: number;
   top_competitors: string;
 }
@@ -175,7 +172,7 @@ export interface HexagonDetail {
   address: string;
   similarity: number;
   opportunity_score: number | null;
-  poi_count: number;
+  poi_density: number;
   explanation_summary: string;
   competition: CompetitionInfo | null;
   competitor_pois: CompetitorPOI[];

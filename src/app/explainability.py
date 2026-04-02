@@ -135,8 +135,6 @@ def explain_competition(
         "vibe_score": round(float(r["similarity"]), 3),
         "competitor_count": int(r.get("competitor_count", 0)),
         "competition_score": round(float(r.get("competition_score", 0)), 3),
-        "demand_score": round(float(r.get("demand_score", 0)), 3),
-        "poi_density": int(r.get("poi_density", 0)),
         "opportunity_score": round(float(r["opportunity_score"]), 3),
         "top_competitors": r.get("top_competitors", ""),
     }

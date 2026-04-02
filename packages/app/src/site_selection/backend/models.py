@@ -68,7 +68,6 @@ class AnalyzeRequest(BaseModel):
     brand_input: BrandInput
     enable_competition: bool = True
     beta: float = Field(default=1.0, ge=-1.0, le=1.0)
-    alpha: float = 0.5
     competitor_brand: str = ""
     include_buildings: bool = True
 
@@ -82,7 +81,7 @@ class HexagonData(BaseModel):
     lat: float
     lon: float
     address: str = ""
-    poi_count: int = 0
+    poi_density: int = 0
     competitor_count: int = 0
     top_competitors: str = ""
     cat_detail: str = ""
@@ -156,8 +155,6 @@ class CompetitionInfo(BaseModel):
     vibe_score: float
     competitor_count: int
     competition_score: float
-    demand_score: float = 0.0
-    poi_density: int = 0
     opportunity_score: float
     top_competitors: str
 
@@ -182,7 +179,7 @@ class HexagonDetailOut(BaseModel):
     address: str
     similarity: float
     opportunity_score: float | None = None
-    poi_count: int = 0
+    poi_density: int = 0
     explanation_summary: str = ""
     competition: CompetitionInfo | None = None
     competitor_pois: list[CompetitorPOI] = []

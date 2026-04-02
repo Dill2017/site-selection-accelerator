@@ -77,7 +77,6 @@ export function ConfigSidebar({
   const [brandValue, setBrandValue] = useState("");
   const [enableCompetition, setEnableCompetition] = useState(true);
   const [beta, setBeta] = useState(1.0);
-  const [alpha, setAlpha] = useState(0.5);
   const [competitorBrand, setCompetitorBrand] = useState("");
   const [includeBuildings, setIncludeBuildings] = useState(true);
 
@@ -254,11 +253,10 @@ export function ConfigSidebar({
       brand_input: brandInput,
       enable_competition: enableCompetition,
       beta,
-      alpha,
       competitor_brand: competitorBrand,
       include_buildings: includeBuildings,
     });
-  }, [canRun, isMapMode, drawnFeatures, brandMode, brandValue, selectedPoiIds, country, city, resolution, selectedCats, enableCompetition, beta, alpha, competitorBrand, includeBuildings, onRun]);
+  }, [canRun, isMapMode, drawnFeatures, brandMode, brandValue, selectedPoiIds, country, city, resolution, selectedCats, enableCompetition, beta, competitorBrand, includeBuildings, onRun]);
 
   const handleSave = useCallback(async () => {
     if (!sessionId) return;
@@ -279,7 +277,6 @@ export function ConfigSidebar({
           brand_input: brandInput,
           enable_competition: enableCompetition,
           beta,
-          alpha,
           competitor_brand: competitorBrand,
           include_buildings: includeBuildings,
         }),
@@ -298,7 +295,7 @@ export function ConfigSidebar({
     } finally {
       setIsSaving(false);
     }
-  }, [sessionId, isMapMode, drawnFeatures, brandMode, brandValue, country, city, resolution, selectedCats, enableCompetition, beta, alpha, competitorBrand, includeBuildings]);
+  }, [sessionId, isMapMode, drawnFeatures, brandMode, brandValue, country, city, resolution, selectedCats, enableCompetition, beta, competitorBrand, includeBuildings]);
 
   if (collapsed) {
     return (
@@ -507,7 +504,7 @@ export function ConfigSidebar({
                   <Input
                     value={competitorBrand}
                     onChange={(e) => setCompetitorBrand(e.target.value)}
-                    placeholder="e.g. Subway, Costa Coffee..."
+                    placeholder="(Optional) e.g. Subway, Costa Coffee..."
                     className="h-8 text-sm"
                   />
                   <p className="text-[10px] text-muted-foreground">
@@ -535,21 +532,6 @@ export function ConfigSidebar({
                     <span>Ignore</span>
                     <span>Penalise</span>
                   </div>
-                </div>
-                <div className="space-y-1">
-                  <div className="flex items-center justify-between">
-                    <span className="text-xs text-muted-foreground">
-                      Demand boost (α)
-                    </span>
-                    <span className="text-xs font-mono">{alpha.toFixed(1)}</span>
-                  </div>
-                  <Slider
-                    value={[alpha]}
-                    onValueChange={([v]) => setAlpha(v)}
-                    min={0}
-                    max={1}
-                    step={0.1}
-                  />
                 </div>
               </>
             )}

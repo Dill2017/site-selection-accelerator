@@ -20,7 +20,6 @@ export interface AnalysisSummary {
     created_at?: string;
 }
 export interface AnalyzeRequest {
-    alpha?: number;
     beta?: number;
     brand_input: BrandInput;
     categories: string[];
@@ -111,9 +110,7 @@ export interface CellPOI {
 export interface CompetitionInfo {
     competition_score: number;
     competitor_count: number;
-    demand_score?: number;
     opportunity_score: number;
-    poi_density?: number;
     top_competitors: string;
     vibe_score: number;
 }
@@ -157,7 +154,7 @@ export interface HexagonData {
     lat: number;
     lon: number;
     opportunity_score?: number | null;
-    poi_count?: number;
+    poi_density?: number;
     similarity: number;
     top_competitors?: string;
 }
@@ -172,7 +169,7 @@ export interface HexagonDetailOut {
     h3_cell: number;
     hex_id: string;
     opportunity_score?: number | null;
-    poi_count?: number;
+    poi_density?: number;
     similarity: number;
 }
 export interface PersistResultOut {

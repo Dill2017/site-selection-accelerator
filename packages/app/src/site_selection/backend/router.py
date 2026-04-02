@@ -417,9 +417,7 @@ async def analyze(req: AnalyzeRequest) -> StreamingResponse:
             else:
                 scored["similarity"] = np.zeros(len(scored))
 
-            # Add cell activity before competition-adjusted scoring.
-            # Uses count_vectors (POIs + buildings) so demand reflects overall
-            # area density — buildings proxy population/footfall.
+            # POI density for display (not used in scoring)
             poi_totals = count_vectors.sum(axis=1).rename("poi_density")
             scored = scored.merge(poi_totals, left_on="h3_cell", right_index=True, how="left")
             scored["poi_density"] = scored["poi_density"].fillna(0).astype(int)
@@ -454,7 +452,7 @@ async def analyze(req: AnalyzeRequest) -> StreamingResponse:
 
                 if competitor_pois is not None and not competitor_pois.empty:
                     scored = compute_opportunity_score(
-                        scored, competition, beta=req.beta, alpha=req.alpha,
+                        scored, competition, beta=req.beta,
                     )
 
             address_lookup = get_nearest_address_per_cell(pois_df)
@@ -720,13 +718,13 @@ async def get_hexagon_detail(session_id: str, hex_id: str):
         row_match = pr.scored[pr.scored["h3_cell"] == h3_cell]
         similarity = float(row_match.iloc[0]["similarity"]) if not row_match.empty else 0.0
         opp_score = None
-        poi_count = 0
+        poi_density_val = 0
         if not row_match.empty:
             r = row_match.iloc[0]
             if "opportunity_score" in r.index:
                 opp_score = float(r["opportunity_score"])
             if "poi_density" in r.index:
-                poi_count = int(r["poi_density"])
+                poi_density_val = int(r["poi_density"])
 
         return HexagonDetailOut(
             h3_cell=h3_cell,
@@ -734,7 +732,7 @@ async def get_hexagon_detail(session_id: str, hex_id: str):
             address=address,
             similarity=similarity,
             opportunity_score=opp_score,
-            poi_count=poi_count,
+            poi_density=poi_density_val,
             explanation_summary=summary,
             competition=comp_info,
             competitor_pois=cell_competitor_pois,
@@ -1117,7 +1115,7 @@ def _build_hexagon_list(
             lat=lat,
             lon=lon,
             address=address_lookup.get(cell, ""),
-            poi_count=int(row.get("poi_density", 0)),
+            poi_density=int(row.get("poi_density", 0)),
             competitor_count=int(row.get("competitor_count", 0)) if has_competition else 0,
             top_competitors=str(row.get("top_competitors", "")) if has_competition else "",
             cat_detail=tooltip_snippet(cell, count_vectors, brand_avg, max_cats=4),
