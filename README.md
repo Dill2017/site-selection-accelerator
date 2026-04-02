@@ -460,8 +460,9 @@ The `geospatial_etl_job` runs these tasks in order:
    train from scratch as fallback)
 5. **Similarity scoring** — cosine similarity between brand profile and every
    city cell
-6. **Competition scoring** — find competitor POIs in high-similarity cells and
-   apply `similarity * (1 - β * competition_score)` to surface true whitespace.
+6. **Opportunity scoring** — combines similarity, demand, and competition into
+   a single score. See [OPPORTUNITY_SCORE_EXPLAINER.md](OPPORTUNITY_SCORE_EXPLAINER.md)
+   for the full formula, parameters, and normalisation details.
 7. **Persist (optional)** — save all results to Delta when the user clicks
    Save Analysis
 

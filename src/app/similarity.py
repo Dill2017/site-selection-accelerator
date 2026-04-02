@@ -80,15 +80,27 @@ def compute_opportunity_score(
     competition: pd.DataFrame,
     beta: float = 0.5,
 ) -> pd.DataFrame:
-    """Apply competition penalty to similarity scores.
+    """Apply competition adjustment to similarity scores.
 
-    opportunity_score = similarity * (1 - beta * competition_score)
+    raw = similarity * (1 - beta * competition_score)
+    opportunity_score = percentile_rank(raw)
+
+    competition_score is normalised by the max of non-zero competitor
+    counts, clipped to [0, 1]. The most saturated cell gets 1.0;
+    cells with fewer competitors are penalised proportionally less.
+    The final score is a percentile rank (0–1), keeping it bounded
+    and distribution-aware regardless of beta direction.
+
+    Beta range [-1, +1] controls the competition strategy:
+      beta > 0 : penalise (avoid saturated areas)
+      beta = 0 : ignore competition
+      beta < 0 : boost  (mirror / co-locate near competition)
 
     Parameters
     ----------
-    scored : DataFrame from compute_similarity (h3_cell, similarity, is_brand_cell)
-    competition : DataFrame from find_competitors (h3_hex, competitor_count, top_competitors)
-    beta : competition sensitivity (0 = ignore, 1 = max penalty)
+    scored : DataFrame from compute_similarity.
+    competition : DataFrame from find_competitors or named competitor lookup.
+    beta : competition sensitivity (-1 = full mirror, 0 = ignore, +1 = full penalty).
     """
     scored = scored.copy()
     scored["h3_hex"] = scored["h3_cell"].apply(h3_int_to_hex)
@@ -101,13 +113,12 @@ def compute_opportunity_score(
     merged["competitor_count"] = merged["competitor_count"].fillna(0).astype(int)
     merged["top_competitors"] = merged["top_competitors"].fillna("")
 
-    max_in_any_cell = competition["competitor_count"].max() if not competition.empty else 1
-    cap = max(max_in_any_cell, 1)
+    nonzero = competition.loc[competition["competitor_count"] > 0, "competitor_count"]
+    cap = max(nonzero.max(), 1) if len(nonzero) > 0 else 1
+    merged["competition_score"] = (merged["competitor_count"] / cap).clip(upper=1.0)
 
-    merged["competition_score"] = merged["competitor_count"] / cap
-    merged["opportunity_score"] = merged["similarity"] * (
-        1 - beta * merged["competition_score"]
-    )
+    raw = merged["similarity"] * (1 - beta * merged["competition_score"])
+    merged["opportunity_score"] = raw.rank(pct=True)
 
     return merged.sort_values(
         "opportunity_score", ascending=False
@@ -118,23 +129,16 @@ def get_top_opportunities(
     scored: pd.DataFrame,
     top_n: int = 20,
 ) -> pd.DataFrame:
-    """Return the top-N whitespace opportunities (excluding existing brand cells).
-
-    Sorts by opportunity_score (or similarity), using poi_density as a
-    tiebreaker so denser areas rank higher among equally-scored cells.
-    """
+    """Return the top-N whitespace opportunities (excluding existing brand cells)."""
     sort_col = (
         "opportunity_score"
         if "opportunity_score" in scored.columns
         else "similarity"
     )
-    sort_cols = [sort_col]
-    if "poi_density" in scored.columns:
-        sort_cols.append("poi_density")
 
     return (
         scored[~scored["is_brand_cell"]]
-        .sort_values(sort_cols, ascending=False)
+        .sort_values(sort_col, ascending=False)
         .head(top_n)
         .reset_index(drop=True)
     )
