@@ -26,3 +26,4 @@ Thumbs.db
 
 # Training logs
 lightning_logs/
+packages/app/src/site_selection/ui/.build/

@@ -155,6 +155,7 @@ export interface HexagonData {
     lon: number;
     opportunity_score?: number | null;
     poi_density?: number;
+    radiance?: number | null;
     similarity: number;
     top_competitors?: string;
 }

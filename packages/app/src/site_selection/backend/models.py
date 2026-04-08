@@ -82,6 +82,7 @@ class HexagonData(BaseModel):
     lon: float
     address: str = ""
     poi_density: int = 0
+    radiance: float | None = None
     competitor_count: int = 0
     top_competitors: str = ""
     cat_detail: str = ""

@@ -28,6 +28,10 @@ GOLD_PLACES_ENRICHED = f"{_CATALOG}.{_SCHEMA}.gold_places_enriched"
 GOLD_BUILDINGS_TABLE = f"{_CATALOG}.{_SCHEMA}.gold_buildings"
 APP_CONFIG_TABLE = f"{_CATALOG}.{_SCHEMA}.app_config"
 
+GOLD_RADIANCE_TABLE = f"{_CATALOG}.{_SCHEMA}.gold_radiance"
+VIIRS_VOLUME_NAME = "viirs_nighttime_lights"
+VIIRS_VOLUME_PATH = f"/Volumes/{_CATALOG}/{_SCHEMA}/{VIIRS_VOLUME_NAME}"
+
 ANALYSES_TABLE = f"{_CATALOG}.{_SCHEMA}.analyses"
 ANALYSIS_BRAND_PROFILES_TABLE = f"{_CATALOG}.{_SCHEMA}.analysis_brand_profiles"
 ANALYSIS_HEXAGONS_TABLE = f"{_CATALOG}.{_SCHEMA}.analysis_hexagons"
