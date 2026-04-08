@@ -1,115 +1,101 @@
-"""VIIRS nighttime radiance → H3 cell aggregation.
+"""Radiance orchestration for the app runtime.
 
-Reads a VIIRS annual composite GeoTIFF (from a UC Volume), clips to a
-city bounding box using rasterio, then uses h3ronpy to directly convert
-raster pixels into H3 cells with mean radiance per cell.
+Provides three capabilities:
+  1. get_radiance_for_city()  — fast SQL lookup from gold_radiance
+  2. submit_radiance_job()    — trigger a serverless job for a cache-miss city
+  3. check_radiance_job()     — poll whether the job has finished
 
-Volume access uses the Databricks SDK Files API (UC-compatible) rather
-than FUSE mounts, so it works on any cluster access mode.
-
-Data source: Earth Observation Group (EOG), Payne Institute for Public Policy.
-License: CC BY 4.0.
-Citation:
-    Elvidge, C.D, Zhizhin, M., Ghosh T., Hsu FC, Taneja J.
-    "Annual time series of global VIIRS nighttime lights derived from
-    monthly averages: 2012 to 2019". Remote Sensing 2021, 13(5), p.922
+The heavy raster computation (rasterio + h3ronpy) runs exclusively on the
+serverless job cluster — this module never touches the VIIRS GeoTIFF directly.
 """
 
 from __future__ import annotations
 
 import logging
-import tempfile
 
-import numpy as np
 import pandas as pd
-from databricks.sdk import WorkspaceClient
+
+from config import GOLD_RADIANCE_TABLE, RADIANCE_JOB_ID
+from db import _get_client, execute_query
 
 log = logging.getLogger(__name__)
 
 
-def _find_viirs_tif(client: WorkspaceClient, volume_path: str) -> str | None:
-    """Find the first .tif file in the Volume using the SDK Files API."""
+def get_radiance_for_city(
+    country: str,
+    city: str,
+    resolution: int = 9,
+) -> pd.DataFrame | None:
+    """Read precomputed radiance from gold_radiance.  Returns None on miss."""
+    if resolution != 9:
+        return None
+
     try:
-        for entry in client.files.list_directory_contents(volume_path):
-            if entry.path and entry.path.lower().endswith(".tif"):
-                return entry.path
+        df = execute_query(f"""
+            SELECT h3_cell, radiance
+            FROM {GOLD_RADIANCE_TABLE}
+            WHERE country = '{country}' AND city_name = '{city}'
+        """)
+        if not df.empty:
+            log.info("Radiance cache hit: %d cells for %s, %s", len(df), city, country)
+            return df
     except Exception as e:
-        log.warning("Could not list Volume %s: %s", volume_path, e)
+        log.debug("gold_radiance query failed: %s", e)
+
     return None
 
 
-def _download_viirs_to_temp(client: WorkspaceClient, volume_file_path: str) -> str:
-    """Download a VIIRS .tif from the Volume to a local temp file."""
-    log.info("Downloading VIIRS tile from Volume: %s", volume_file_path)
-    resp = client.files.download(volume_file_path)
-    tmp = tempfile.NamedTemporaryFile(suffix=".tif", delete=False)
-    tmp.write(resp.contents.read())
-    tmp.close()
-    log.info("Downloaded to %s", tmp.name)
-    return tmp.name
-
-
-def compute_radiance_h3(
-    viirs_path: str,
-    city_row: dict,
+def submit_radiance_job(
+    country: str,
+    city: str,
     resolution: int = 9,
-) -> pd.DataFrame:
-    """Read VIIRS raster for a city bbox and return mean radiance per H3 cell.
+) -> int | None:
+    """Submit a serverless run of the on-demand radiance job.
 
-    Uses rasterio to clip the GeoTIFF to the city bounding box, then
-    h3ronpy.pandas.raster.raster_to_dataframe to directly convert raster
-    pixels into H3 cells with aggregated values.
-
-    Parameters
-    ----------
-    viirs_path : str
-        Local filesystem path to the VIIRS GeoTIFF file (downloaded from
-        the Volume via _download_viirs_to_temp).
-    city_row : dict
-        Row from gold_cities containing at minimum:
-        bbox_xmin, bbox_xmax, bbox_ymin, bbox_ymax.
-    resolution : int
-        H3 resolution for cell assignment.
-
-    Returns
-    -------
-    pd.DataFrame
-        Columns: h3_cell (int64), radiance (float64).
+    Returns the run_id, or None if the job could not be triggered.
     """
-    import rasterio
-    from rasterio.windows import from_bounds
-    from h3ronpy.pandas.raster import raster_to_dataframe
+    if not RADIANCE_JOB_ID:
+        log.debug("RADIANCE_JOB_ID not configured — skipping submission")
+        return None
 
-    xmin = float(city_row["bbox_xmin"])
-    xmax = float(city_row["bbox_xmax"])
-    ymin = float(city_row["bbox_ymin"])
-    ymax = float(city_row["bbox_ymax"])
+    client = _get_client()
+    try:
+        run = client.jobs.run_now(
+            job_id=int(RADIANCE_JOB_ID),
+            job_parameters={
+                "country": country,
+                "city": city,
+                "resolution": str(resolution),
+            },
+        )
+        log.info(
+            "Submitted radiance job run_id=%s for %s, %s (res %d)",
+            run.run_id, city, country, resolution,
+        )
+        return run.run_id
+    except Exception as e:
+        log.warning("Failed to submit radiance job: %s", e)
+        return None
 
-    with rasterio.open(viirs_path) as src:
-        window = from_bounds(xmin, ymin, xmax, ymax, transform=src.transform)
-        data = src.read(1, window=window)
-        win_transform = src.window_transform(window)
 
-    rows_px, cols_px = data.shape
-    if rows_px == 0 or cols_px == 0:
-        log.warning("Empty raster window for bbox [%s,%s,%s,%s]", xmin, ymin, xmax, ymax)
-        return pd.DataFrame(columns=["h3_cell", "radiance"])
+def check_radiance_job(run_id: int) -> str:
+    """Poll the status of a radiance job run.
 
-    data_clean = np.nan_to_num(data.astype(np.float64), nan=0.0)
+    Returns one of: "COMPLETED", "RUNNING", "FAILED".
+    """
+    client = _get_client()
+    try:
+        run = client.jobs.get_run(run_id)
+        state = run.state
+        if state and state.life_cycle_state:
+            lcs = state.life_cycle_state.value
+            if lcs == "TERMINATED":
+                result = state.result_state.value if state.result_state else "UNKNOWN"
+                return "COMPLETED" if result == "SUCCESS" else "FAILED"
+            if lcs in ("INTERNAL_ERROR", "SKIPPED"):
+                return "FAILED"
+            return "RUNNING"
+    except Exception as e:
+        log.warning("Could not check radiance run %s: %s", run_id, e)
 
-    df = raster_to_dataframe(
-        data_clean,
-        win_transform,
-        h3_resolution=resolution,
-        nodata_value=0.0,
-        compact=False,
-    )
-
-    df["cell"] = df["cell"].astype("int64")
-    df = df.rename(columns={"cell": "h3_cell", "value": "radiance"})
-
-    log.info(
-        "Raster→H3: %d cells at res %d (bbox %.2f,%.2f → %.2f,%.2f)",
-        len(df), resolution, xmin, ymin, xmax, ymax,
-    )
-    return df
+    return "FAILED"

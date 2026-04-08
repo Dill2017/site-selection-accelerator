@@ -240,12 +240,17 @@ def _compute_radiance_for_city(
     return filtered
 
 
-def main(catalog: str, schema: str, warehouse_id: str) -> str:
+def main(
+    catalog: str,
+    schema: str,
+    warehouse_id: str,
+    viirs_volume_name: str = "viirs_nighttime_lights",
+) -> str:
     """Compute gold_radiance for all training cities."""
     profile = os.environ.get("DATABRICKS_CONFIG_PROFILE")
     client = WorkspaceClient(profile=profile) if profile else WorkspaceClient()
 
-    volume_path = f"/Volumes/{catalog}/{schema}/viirs_nighttime_lights"
+    volume_path = f"/Volumes/{catalog}/{schema}/{viirs_volume_name}"
     viirs_volume_path = _find_viirs_tif(client, volume_path)
 
     if viirs_volume_path is None:
@@ -257,7 +262,7 @@ def main(catalog: str, schema: str, warehouse_id: str) -> str:
         )
         return "SKIPPED"
 
-    fuse_path = f"/Volumes/{catalog}/{schema}/viirs_nighttime_lights/{viirs_volume_path.split('/')[-1]}"
+    fuse_path = f"/Volumes/{catalog}/{schema}/{viirs_volume_name}/{viirs_volume_path.split('/')[-1]}"
     print(f"[VIIRS] Using tile via FUSE: {fuse_path}")
 
     city_rows = _get_city_rows(client, warehouse_id, catalog, schema)
@@ -320,15 +325,18 @@ if __name__ == "__main__":
         catalog = dbutils.widgets.get("catalog")
         schema = dbutils.widgets.get("schema")
         warehouse_id = dbutils.widgets.get("warehouse_id")
+        viirs_volume_name = dbutils.widgets.get("viirs_volume_name")
     except Exception:
         if len(sys.argv) >= 4:
             catalog, schema, warehouse_id = sys.argv[1], sys.argv[2], sys.argv[3]
+            viirs_volume_name = sys.argv[4] if len(sys.argv) >= 5 else "viirs_nighttime_lights"
         else:
             from dotenv import load_dotenv
             load_dotenv()
             catalog = os.getenv("GOLD_CATALOG", "")
             schema = os.getenv("GOLD_SCHEMA", "")
             warehouse_id = os.getenv("DATABRICKS_WAREHOUSE_ID", "")
+            viirs_volume_name = os.getenv("VIIRS_VOLUME_NAME", "viirs_nighttime_lights")
 
-    result = main(catalog, schema, warehouse_id)
+    result = main(catalog, schema, warehouse_id, viirs_volume_name)
     print(f"GOLD_RADIANCE_RESULT={result}")

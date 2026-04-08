@@ -16,8 +16,6 @@ from config import (
     GOLD_BUILDINGS_TABLE,
     GOLD_CITIES_TABLE,
     GOLD_PLACES_TABLE,
-    GOLD_RADIANCE_TABLE,
-    VIIRS_VOLUME_PATH,
 )
 from db import execute_query
 
@@ -274,73 +272,6 @@ def get_nearest_address_per_cell(pois_df: pd.DataFrame) -> dict[int, str]:
         .set_index("h3_cell")["address"]
     )
     return addr.to_dict()
-
-
-# ── VIIRS nighttime radiance ─────────────────────────────────────────────────
-
-
-def get_radiance_for_city(
-    country: str,
-    city: str,
-    resolution: int,
-) -> pd.DataFrame | None:
-    """Return mean radiance per H3 cell for a city, or None if unavailable.
-
-    Strategy:
-      1. Check gold_radiance table (precomputed at res 9 for training cities).
-      2. If not found or resolution differs, compute on-the-fly from the
-         VIIRS GeoTIFF in the UC Volume using h3ronpy.
-      3. If neither source is available, return None.
-    """
-    if resolution == 9:
-        try:
-            df = execute_query(f"""
-                SELECT h3_cell, radiance
-                FROM {GOLD_RADIANCE_TABLE}
-                WHERE country = '{country}' AND city_name = '{city}'
-            """)
-            if not df.empty:
-                _log.info("Radiance: loaded %d cells from gold_radiance", len(df))
-                return df
-        except Exception as e:
-            _log.debug("gold_radiance table not available: %s", e)
-
-    import os as _os
-    from radiance import compute_radiance_h3, _find_viirs_tif, _download_viirs_to_temp
-    from db import _get_client
-
-    client = _get_client()
-    viirs_volume_path = _find_viirs_tif(client, VIIRS_VOLUME_PATH)
-    if viirs_volume_path is None:
-        _log.info("VIIRS file not found in %s — skipping radiance", VIIRS_VOLUME_PATH)
-        return None
-
-    local_tif = _download_viirs_to_temp(client, viirs_volume_path)
-    try:
-        city_info = execute_query(f"""
-            SELECT bbox_xmin, bbox_xmax, bbox_ymin, bbox_ymax
-            FROM {GOLD_CITIES_TABLE}
-            WHERE country = '{country}' AND city_name = '{city}'
-            LIMIT 1
-        """)
-        if city_info.empty:
-            _log.warning("City not found for radiance: %s, %s", city, country)
-            return None
-
-        city_row = city_info.iloc[0].to_dict()
-        result = compute_radiance_h3(local_tif, city_row, resolution)
-        if result.empty:
-            return None
-
-        _log.info("Radiance: computed %d cells on-the-fly via h3ronpy", len(result))
-        return result
-
-    except Exception as e:
-        _log.warning("On-the-fly radiance computation failed: %s", e)
-        return None
-    finally:
-        _os.unlink(local_tif)
-        _log.debug("Cleaned up temp VIIRS file %s", local_tif)
 
 
 # ── Cross-city helpers (brand locations outside the target city) ─────────────

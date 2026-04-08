@@ -47,6 +47,10 @@ variables:
       CARTO Overture Maps Buildings catalog (install from Databricks Marketplace).
       Default: carto_overture_maps_buildings
     default: "carto_overture_maps_buildings"
+  viirs_volume_name:
+    description: >
+      Name of the UC Volume containing the VIIRS nighttime lights GeoTIFF.
+    default: "viirs_nighttime_lights"
 
 targets:
   dev:

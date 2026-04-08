@@ -10,3 +10,7 @@ resources:
           sql_warehouse:
             id: ${var.warehouse_id}
             permission: "CAN_USE"
+        - name: "radiance-job"
+          job:
+            id: ${resources.jobs.radiance_on_demand.id}
+            permission: "CAN_MANAGE_RUN"

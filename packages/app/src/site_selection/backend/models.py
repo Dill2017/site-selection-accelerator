@@ -70,6 +70,7 @@ class AnalyzeRequest(BaseModel):
     beta: float = Field(default=1.0, ge=-1.0, le=1.0)
     competitor_brand: str = ""
     include_buildings: bool = True
+    include_radiance: bool = True
 
 
 class HexagonData(BaseModel):

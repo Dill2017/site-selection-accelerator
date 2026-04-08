@@ -249,6 +249,27 @@ async def analyze(req: AnalyzeRequest) -> StreamingResponse:
             except Exception:
                 pretrained, pretrained_meta = None, None
 
+            # Radiance: check cache, submit serverless job on miss
+            radiance_df = None
+            radiance_run_id = None
+            if req.include_radiance:
+                from radiance import (
+                    check_radiance_job,
+                    get_radiance_for_city,
+                    submit_radiance_job,
+                )
+
+                radiance_df = get_radiance_for_city(req.country, req.city, req.resolution)
+                if radiance_df is None:
+                    try:
+                        radiance_run_id = submit_radiance_job(
+                            req.country, req.city, req.resolution,
+                        )
+                        if radiance_run_id:
+                            log.info("Submitted radiance job run_id=%s", radiance_run_id)
+                    except Exception as e:
+                        log.debug("Could not submit radiance job: %s", e)
+
             # Resolve brand locations
             yield _sse({"type": "progress", "step": "resolving_brand", "pct": 10})
             brand_pois_df = None
@@ -385,19 +406,6 @@ async def analyze(req: AnalyzeRequest) -> StreamingResponse:
             yield _sse({"type": "progress", "step": "building_vectors", "pct": 40})
             count_vectors = build_count_vectors(features_df)
 
-            # Nighttime radiance (fetch early, merge after scoring)
-            radiance_df = None
-            try:
-                yield _sse({"type": "progress", "step": "querying_radiance", "pct": 45})
-                from pipeline import get_radiance_for_city
-                radiance_df = get_radiance_for_city(req.country, req.city, req.resolution)
-                if radiance_df is not None and not radiance_df.empty:
-                    log.info("Radiance: fetched %d cells for %s, %s", len(radiance_df), req.city, req.country)
-                else:
-                    radiance_df = None
-            except Exception as e:
-                log.debug("Radiance fetch skipped: %s", e)
-
             # Embeddings
             use_pretrained = (
                 pretrained is not None
@@ -435,7 +443,36 @@ async def analyze(req: AnalyzeRequest) -> StreamingResponse:
             scored = scored.merge(poi_totals, left_on="h3_cell", right_index=True, how="left")
             scored["poi_density"] = scored["poi_density"].fillna(0).astype(int)
 
-            # Merge pre-fetched radiance onto scored hexagons
+            # Radiance: poll gold_radiance table until data appears
+            if radiance_df is None and radiance_run_id is not None:
+                import time as _time
+
+                yield _sse({"type": "progress", "step": "computing_radiance", "pct": 82})
+                max_wait_s = 300
+                poll_interval_s = 1
+                elapsed = 0.0
+                try:
+                    while elapsed < max_wait_s:
+                        radiance_df = get_radiance_for_city(
+                            req.country, req.city, req.resolution,
+                        )
+                        if radiance_df is not None:
+                            log.info(
+                                "Radiance data available (%.0fs), %d cells",
+                                elapsed, len(radiance_df),
+                            )
+                            break
+                        status = check_radiance_job(radiance_run_id)
+                        if status == "FAILED":
+                            log.warning("Radiance job failed after %.0fs", elapsed)
+                            break
+                        _time.sleep(poll_interval_s)
+                        elapsed += poll_interval_s
+                    else:
+                        log.warning("Radiance wait timed out after %ds", max_wait_s)
+                except Exception as e:
+                    log.debug("Radiance poll failed: %s", e)
+
             if radiance_df is not None:
                 scored = scored.merge(
                     radiance_df[["h3_cell", "radiance"]],

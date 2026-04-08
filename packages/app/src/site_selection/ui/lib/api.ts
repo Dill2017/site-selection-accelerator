@@ -28,6 +28,7 @@ export interface AnalyzeRequest {
     country: string;
     enable_competition?: boolean;
     include_buildings?: boolean;
+    include_radiance?: boolean;
     resolution?: number;
 }
 export interface AnalyzeResultOut {

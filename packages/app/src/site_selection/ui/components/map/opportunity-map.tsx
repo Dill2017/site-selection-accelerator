@@ -309,7 +309,10 @@ export function OpportunityMap({
             />
           )}
           {hoverInfo.brand && (
-            <BrandTooltipContent brand={hoverInfo.brand} />
+            <BrandTooltipContent
+              brand={hoverInfo.brand}
+              hex={hexById.get(hoverInfo.brand.hex_id)}
+            />
           )}
         </div>
       )}
@@ -351,7 +354,13 @@ export function OpportunityMap({
   );
 }
 
-function BrandTooltipContent({ brand }: { brand: BrandLocationData }) {
+function BrandTooltipContent({
+  brand,
+  hex,
+}: {
+  brand: BrandLocationData;
+  hex?: HexagonData;
+}) {
   const isSource = brand.is_source !== false;
   return (
     <div className="space-y-1">
@@ -363,7 +372,30 @@ function BrandTooltipContent({ brand }: { brand: BrandLocationData }) {
       <div className="grid grid-cols-2 gap-x-3 gap-y-0.5 pt-1">
         <span className="text-muted-foreground">Stores in cell</span>
         <span className="font-medium">{brand.count}</span>
+        {hex && Number.isFinite(hex.poi_density) && (
+          <>
+            <span className="text-muted-foreground">POI Density</span>
+            <span className="font-medium">{hex.poi_density}</span>
+          </>
+        )}
+        {hex?.radiance != null && Number.isFinite(hex.radiance) && (
+          <>
+            <span className="text-muted-foreground">Economic Activity</span>
+            <span className="font-medium">
+              {hex.radiance.toFixed(2)} nW/cm²/sr
+              <span className="ml-1 text-xs text-muted-foreground">
+                ({radianceLabel(hex.radiance)})
+              </span>
+            </span>
+          </>
+        )}
       </div>
+      {hex?.cat_detail && (
+        <div
+          className="pt-1 border-t text-muted-foreground"
+          dangerouslySetInnerHTML={{ __html: hex.cat_detail }}
+        />
+      )}
     </div>
   );
 }
@@ -399,6 +431,17 @@ function TooltipContent({
               <>
                 <span className="text-muted-foreground">POI Density</span>
                 <span className="font-medium">{hex.poi_density}</span>
+              </>
+            )}
+            {hex.radiance != null && Number.isFinite(hex.radiance) && (
+              <>
+                <span className="text-muted-foreground">Economic Activity</span>
+                <span className="font-medium">
+                  {hex.radiance.toFixed(2)} nW/cm²/sr
+                  <span className="ml-1 text-xs text-muted-foreground">
+                    ({radianceLabel(hex.radiance)})
+                  </span>
+                </span>
               </>
             )}
           </>
@@ -443,7 +486,7 @@ function TooltipContent({
           {hex.top_competitors}
         </div>
       )}
-      {!isExistingCell && hex.cat_detail && (
+      {hex.cat_detail && (
         <div
           className="pt-1 border-t text-muted-foreground"
           dangerouslySetInnerHTML={{ __html: hex.cat_detail }}

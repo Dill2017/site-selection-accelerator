@@ -3,6 +3,8 @@ command: ["uvicorn", "site_selection.backend.app:app", "--workers", "1"]
 env:
   - name: DATABRICKS_WAREHOUSE_ID
     valueFrom: sql-warehouse
+  - name: RADIANCE_JOB_ID
+    valueFrom: radiance-job
   # IMPORTANT: these must match the catalog and schema in databricks.yml
   - name: GOLD_CATALOG
     value: "beatrice_liew"

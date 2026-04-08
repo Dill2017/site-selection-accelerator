@@ -29,8 +29,8 @@ GOLD_BUILDINGS_TABLE = f"{_CATALOG}.{_SCHEMA}.gold_buildings"
 APP_CONFIG_TABLE = f"{_CATALOG}.{_SCHEMA}.app_config"
 
 GOLD_RADIANCE_TABLE = f"{_CATALOG}.{_SCHEMA}.gold_radiance"
-VIIRS_VOLUME_NAME = "viirs_nighttime_lights"
-VIIRS_VOLUME_PATH = f"/Volumes/{_CATALOG}/{_SCHEMA}/{VIIRS_VOLUME_NAME}"
+
+RADIANCE_JOB_ID = os.getenv("RADIANCE_JOB_ID", "")
 
 ANALYSES_TABLE = f"{_CATALOG}.{_SCHEMA}.analyses"
 ANALYSIS_BRAND_PROFILES_TABLE = f"{_CATALOG}.{_SCHEMA}.analysis_brand_profiles"

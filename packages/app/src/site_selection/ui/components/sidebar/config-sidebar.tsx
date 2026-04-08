@@ -79,6 +79,7 @@ export function ConfigSidebar({
   const [beta, setBeta] = useState(1.0);
   const [competitorBrand, setCompetitorBrand] = useState("");
   const [includeBuildings, setIncludeBuildings] = useState(true);
+  const [includeRadiance, setIncludeRadiance] = useState(true);
 
   const [loadError, setLoadError] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
@@ -255,8 +256,9 @@ export function ConfigSidebar({
       beta,
       competitor_brand: competitorBrand,
       include_buildings: includeBuildings,
+      include_radiance: includeRadiance,
     });
-  }, [canRun, isMapMode, drawnFeatures, brandMode, brandValue, selectedPoiIds, country, city, resolution, selectedCats, enableCompetition, beta, competitorBrand, includeBuildings, onRun]);
+  }, [canRun, isMapMode, drawnFeatures, brandMode, brandValue, selectedPoiIds, country, city, resolution, selectedCats, enableCompetition, beta, competitorBrand, includeBuildings, includeRadiance, onRun]);
 
   const handleSave = useCallback(async () => {
     if (!sessionId) return;
@@ -279,6 +281,7 @@ export function ConfigSidebar({
           beta,
           competitor_brand: competitorBrand,
           include_buildings: includeBuildings,
+          include_radiance: includeRadiance,
         }),
       });
 
@@ -295,7 +298,7 @@ export function ConfigSidebar({
     } finally {
       setIsSaving(false);
     }
-  }, [sessionId, isMapMode, drawnFeatures, brandMode, brandValue, country, city, resolution, selectedCats, enableCompetition, beta, competitorBrand, includeBuildings]);
+  }, [sessionId, isMapMode, drawnFeatures, brandMode, brandValue, country, city, resolution, selectedCats, enableCompetition, beta, competitorBrand, includeBuildings, includeRadiance]);
 
   if (collapsed) {
     return (
@@ -544,6 +547,22 @@ export function ConfigSidebar({
               checked={includeBuildings}
               onCheckedChange={setIncludeBuildings}
             />
+          </div>
+
+          {/* Economic Activity (Radiance) */}
+          <div className="space-y-1">
+            <div className="flex items-center justify-between">
+              <Label className="text-xs font-medium text-muted-foreground">Economic Activity</Label>
+              <Switch
+                checked={includeRadiance}
+                onCheckedChange={setIncludeRadiance}
+              />
+            </div>
+            {includeRadiance && (
+              <p className="text-[10px] text-muted-foreground/70">
+                May add ~2 min for cities not yet cached
+              </p>
+            )}
           </div>
         </div>
       </ScrollArea>
