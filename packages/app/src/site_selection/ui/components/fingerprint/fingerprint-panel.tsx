@@ -114,6 +114,11 @@ export function FingerprintPanel({
               <Badge variant="secondary" className="text-xs">
                 POI Density: {detail.poi_density}
               </Badge>
+              {hex?.radiance != null && Number.isFinite(hex.radiance) && (
+                <Badge variant="secondary" className="text-xs">
+                  Economic Activity: {hex.radiance.toFixed(1)} nW/cm²/sr
+                </Badge>
+              )}
               {detail.competition && detail.competition.competitor_count > 0 && (
                 <Badge variant="secondary" className="text-xs">
                   Competition: {detail.competition.competitor_count}

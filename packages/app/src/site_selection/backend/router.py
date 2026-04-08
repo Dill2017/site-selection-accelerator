@@ -385,6 +385,19 @@ async def analyze(req: AnalyzeRequest) -> StreamingResponse:
             yield _sse({"type": "progress", "step": "building_vectors", "pct": 40})
             count_vectors = build_count_vectors(features_df)
 
+            # Nighttime radiance (fetch early, merge after scoring)
+            radiance_df = None
+            try:
+                yield _sse({"type": "progress", "step": "querying_radiance", "pct": 45})
+                from pipeline import get_radiance_for_city
+                radiance_df = get_radiance_for_city(req.country, req.city, req.resolution)
+                if radiance_df is not None and not radiance_df.empty:
+                    log.info("Radiance: fetched %d cells for %s, %s", len(radiance_df), req.city, req.country)
+                else:
+                    radiance_df = None
+            except Exception as e:
+                log.debug("Radiance fetch skipped: %s", e)
+
             # Embeddings
             use_pretrained = (
                 pretrained is not None
@@ -421,6 +434,14 @@ async def analyze(req: AnalyzeRequest) -> StreamingResponse:
             poi_totals = count_vectors.sum(axis=1).rename("poi_density")
             scored = scored.merge(poi_totals, left_on="h3_cell", right_index=True, how="left")
             scored["poi_density"] = scored["poi_density"].fillna(0).astype(int)
+
+            # Merge pre-fetched radiance onto scored hexagons
+            if radiance_df is not None:
+                scored = scored.merge(
+                    radiance_df[["h3_cell", "radiance"]],
+                    on="h3_cell", how="left",
+                )
+                log.info("Radiance merged: %d cells with values", scored["radiance"].notna().sum())
 
             # Competition / Saturation
             competitor_pois = None
@@ -1099,6 +1120,7 @@ def _build_hexagon_list(
     from explainability import tooltip_snippet
 
     has_competition = "opportunity_score" in scored.columns
+    has_radiance = "radiance" in scored.columns
     hexagons: list[HexagonData] = []
     for _, row in scored.iterrows():
         cell = int(row["h3_cell"])
@@ -1106,6 +1128,7 @@ def _build_hexagon_list(
         lat, lon = _h3_center(cell)
         sim = float(row["similarity"])
         opp = float(row["opportunity_score"]) if has_competition and pd.notna(row.get("opportunity_score")) else None
+        rad = round(float(row["radiance"]), 2) if has_radiance and pd.notna(row.get("radiance")) else None
         hexagons.append(HexagonData(
             h3_cell=cell,
             hex_id=hex_id,
@@ -1116,6 +1139,7 @@ def _build_hexagon_list(
             lon=lon,
             address=address_lookup.get(cell, ""),
             poi_density=int(row.get("poi_density", 0)),
+            radiance=rad,
             competitor_count=int(row.get("competitor_count", 0)) if has_competition else 0,
             top_competitors=str(row.get("top_competitors", "")) if has_competition else "",
             cat_detail=tooltip_snippet(cell, count_vectors, brand_avg, max_cats=4),

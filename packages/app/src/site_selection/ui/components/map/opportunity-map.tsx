@@ -21,6 +21,14 @@ function scoreToColor(score: number): [number, number, number, number] {
   return [r, g, b, 140];
 }
 
+function radianceLabel(value: number): string {
+  if (value <= 2) return "Rural / unlit";
+  if (value <= 10) return "Suburban";
+  if (value <= 30) return "Urban neighbourhood";
+  if (value <= 80) return "City centre";
+  return "Major commercial district";
+}
+
 function DeckGLOverlay(props: {
   layers: Layer[];
   onHover?: (info: PickingInfo) => void;
@@ -406,6 +414,17 @@ function TooltipContent({
               <>
                 <span className="text-muted-foreground">POI Density</span>
                 <span className="font-medium">{hex.poi_density}</span>
+              </>
+            )}
+            {hex.radiance != null && Number.isFinite(hex.radiance) && (
+              <>
+                <span className="text-muted-foreground">Economic Activity</span>
+                <span className="font-medium">
+                  {hex.radiance.toFixed(2)} nW/cm²/sr
+                  <span className="ml-1 text-xs text-muted-foreground">
+                    ({radianceLabel(hex.radiance)})
+                  </span>
+                </span>
               </>
             )}
             {hasCompetition && (hex.competitor_count ?? 0) > 0 && (

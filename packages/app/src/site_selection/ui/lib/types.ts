@@ -61,6 +61,7 @@ export interface HexagonData {
   lon: number;
   address: string;
   poi_density: number;
+  radiance: number | null;
   competitor_count: number;
   top_competitors: string;
   cat_detail: string;
@@ -232,6 +233,7 @@ export const STEP_LABELS: Record<string, string> = {
   querying_pois: "Querying POIs...",
   querying_buildings: "Querying buildings...",
   building_vectors: "Building count vectors...",
+  querying_radiance: "Querying nighttime radiance...",
   generating_embeddings: "Generating embeddings...",
   computing_similarity: "Computing similarity scores...",
   finding_competitors: "Finding competitors...",
