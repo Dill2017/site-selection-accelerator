@@ -65,6 +65,26 @@ resources:
             parameters:
               catalog: ${var.catalog}
               schema: ${var.schema}
+        - task_key: "create_gold_radiance"
+          depends_on:
+            - task_key: "create_gold_cities"
+          spark_python_task:
+            python_file: ../src/pipeline/transformations/create_gold_radiance.py
+            parameters:
+              - "${var.catalog}"
+              - "${var.schema}"
+              - "${var.warehouse_id}"
+              - "${var.viirs_volume_name}"
+          libraries:
+            - pypi:
+                package: "databricks-sdk>=0.65.0"
+            - pypi:
+                package: "rasterio>=1.3.0,<1.5"
+            - pypi:
+                package: "h3ronpy>=0.22.0"
+            - pypi:
+                package: "geopandas"
+          job_cluster_key: "single_node"
         - task_key: "setup_genie_space"
           depends_on:
             - task_key: "create_gold_places_enriched"
@@ -100,6 +120,9 @@ resources:
                 package: "h3>=4"
             - pypi:
                 package: "shapely"
+          job_cluster_key: "single_node"
+      job_clusters:
+        - job_cluster_key: "single_node"
           new_cluster:
             spark_version: "16.4.x-scala2.12"
             node_type_id: ${var.node_type_id}

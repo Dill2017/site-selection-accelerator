@@ -77,7 +77,9 @@ export function ConfigSidebar({
   const [brandValue, setBrandValue] = useState("");
   const [enableCompetition, setEnableCompetition] = useState(true);
   const [beta, setBeta] = useState(1.0);
+  const [competitorBrand, setCompetitorBrand] = useState("");
   const [includeBuildings, setIncludeBuildings] = useState(true);
+  const [includeRadiance, setIncludeRadiance] = useState(true);
 
   const [loadError, setLoadError] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
@@ -181,11 +183,17 @@ export function ConfigSidebar({
   const isMapMode = brandMode === "map_selection";
   const mapFeatureTotal = drawnFeatureCounts.points + drawnFeatureCounts.polygons;
 
+  const addressBlocked =
+    brandMode === "addresses" &&
+    !!brandValue.trim() &&
+    (isResolving || resolvedFor !== brandValue || (needsDisambiguation && selectedPoiIds.size === 0));
+
   const canRun =
     !!country &&
     !!city &&
     selectedCats.size > 0 &&
-    (isMapMode ? mapFeatureTotal > 0 : !!brandValue.trim());
+    (isMapMode ? mapFeatureTotal > 0 : !!brandValue.trim()) &&
+    !addressBlocked;
 
   const resolveAddresses = useCallback(async (text: string) => {
     if (!text.trim()) return;
@@ -246,9 +254,11 @@ export function ConfigSidebar({
       brand_input: brandInput,
       enable_competition: enableCompetition,
       beta,
+      competitor_brand: competitorBrand,
       include_buildings: includeBuildings,
+      include_radiance: includeRadiance,
     });
-  }, [canRun, isMapMode, drawnFeatures, brandMode, brandValue, selectedPoiIds, country, city, resolution, selectedCats, enableCompetition, beta, includeBuildings, onRun]);
+  }, [canRun, isMapMode, drawnFeatures, brandMode, brandValue, selectedPoiIds, country, city, resolution, selectedCats, enableCompetition, beta, competitorBrand, includeBuildings, includeRadiance, onRun]);
 
   const handleSave = useCallback(async () => {
     if (!sessionId) return;
@@ -269,7 +279,9 @@ export function ConfigSidebar({
           brand_input: brandInput,
           enable_competition: enableCompetition,
           beta,
+          competitor_brand: competitorBrand,
           include_buildings: includeBuildings,
+          include_radiance: includeRadiance,
         }),
       });
 
@@ -286,7 +298,7 @@ export function ConfigSidebar({
     } finally {
       setIsSaving(false);
     }
-  }, [sessionId, isMapMode, drawnFeatures, brandMode, brandValue, country, city, resolution, selectedCats, enableCompetition, beta, includeBuildings]);
+  }, [sessionId, isMapMode, drawnFeatures, brandMode, brandValue, country, city, resolution, selectedCats, enableCompetition, beta, competitorBrand, includeBuildings, includeRadiance]);
 
   if (collapsed) {
     return (
@@ -480,7 +492,7 @@ export function ConfigSidebar({
 
           <Separator />
 
-          {/* Competition */}
+          {/* Scoring */}
           <div className="space-y-3">
             <div className="flex items-center justify-between">
               <Label className="text-xs font-medium text-muted-foreground">Competition</Label>
@@ -490,21 +502,41 @@ export function ConfigSidebar({
               />
             </div>
             {enableCompetition && (
-              <div className="space-y-1">
-                <div className="flex items-center justify-between">
-                  <span className="text-xs text-muted-foreground">
-                    Sensitivity (β)
-                  </span>
-                  <span className="text-xs font-mono">{beta.toFixed(1)}</span>
+              <>
+                <div className="space-y-1.5">
+                  <Input
+                    value={competitorBrand}
+                    onChange={(e) => setCompetitorBrand(e.target.value)}
+                    placeholder="(Optional) e.g. Subway, Costa Coffee..."
+                    className="h-8 text-sm"
+                  />
+                  <p className="text-[10px] text-muted-foreground">
+                    {competitorBrand.trim()
+                      ? "Only this brand counts as competition"
+                      : "Leave empty for category-based market saturation"}
+                  </p>
                 </div>
-                <Slider
-                  value={[beta]}
-                  onValueChange={([v]) => setBeta(v)}
-                  min={0}
-                  max={1}
-                  step={0.1}
-                />
-              </div>
+                <div className="space-y-1">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs text-muted-foreground">
+                      {competitorBrand.trim() ? "Competition proximity" : "Market saturation"} (β)
+                    </span>
+                    <span className="text-xs font-mono">{beta.toFixed(1)}</span>
+                  </div>
+                  <Slider
+                    value={[beta]}
+                    onValueChange={([v]) => setBeta(v)}
+                    min={-1}
+                    max={1}
+                    step={0.1}
+                  />
+                  <div className="flex justify-between text-[10px] text-muted-foreground">
+                    <span>Mirror</span>
+                    <span>Ignore</span>
+                    <span>Penalise</span>
+                  </div>
+                </div>
+              </>
             )}
           </div>
 
@@ -515,6 +547,22 @@ export function ConfigSidebar({
               checked={includeBuildings}
               onCheckedChange={setIncludeBuildings}
             />
+          </div>
+
+          {/* Economic Activity (Radiance) */}
+          <div className="space-y-1">
+            <div className="flex items-center justify-between">
+              <Label className="text-xs font-medium text-muted-foreground">Economic Activity</Label>
+              <Switch
+                checked={includeRadiance}
+                onCheckedChange={setIncludeRadiance}
+              />
+            </div>
+            {includeRadiance && (
+              <p className="text-[10px] text-muted-foreground/70">
+                May add ~2 min for cities not yet cached
+              </p>
+            )}
           </div>
         </div>
       </ScrollArea>

@@ -21,6 +21,14 @@ function scoreToColor(score: number): [number, number, number, number] {
   return [r, g, b, 140];
 }
 
+function radianceLabel(value: number): string {
+  if (value <= 2) return "Rural / unlit";
+  if (value <= 10) return "Suburban";
+  if (value <= 30) return "Urban neighbourhood";
+  if (value <= 80) return "City centre";
+  return "Major commercial district";
+}
+
 function DeckGLOverlay(props: {
   layers: Layer[];
   onHover?: (info: PickingInfo) => void;
@@ -39,6 +47,7 @@ interface OpportunityMapProps {
   centerLat?: number;
   centerLon?: number;
   hasCompetition?: boolean;
+  competitorBrand?: string;
   onHexClick?: (hex: HexagonData) => void;
   onMapReady?: (map: maplibregl.Map) => void;
   drawingEnabled?: boolean;
@@ -57,6 +66,7 @@ export function OpportunityMap({
   centerLat,
   centerLon,
   hasCompetition = false,
+  competitorBrand = "",
   onHexClick,
   onMapReady,
   drawingEnabled = false,
@@ -224,16 +234,25 @@ export function OpportunityMap({
       );
     }
 
+    const showCompetitorRing = Boolean(competitorBrand);
     result.push(
       new ScatterplotLayer<HexagonData>({
         id: "top-opps",
         data: topOpps,
         getPosition: (d) => [d.lon, d.lat],
         getFillColor: [0, 200, 80, 220],
-        getRadius: 100,
+        getLineColor: (d) =>
+          showCompetitorRing && (d.competitor_count ?? 0) > 0
+            ? [255, 255, 255, 255]
+            : [0, 0, 0, 0],
+        getLineWidth: (d) =>
+          showCompetitorRing && (d.competitor_count ?? 0) > 0 ? 4 : 0,
+        getRadius: 140,
+        stroked: true,
         pickable: false,
-        radiusMinPixels: 3,
-        radiusMaxPixels: 16,
+        radiusMinPixels: 5,
+        radiusMaxPixels: 20,
+        lineWidthMinPixels: 3,
       }),
     );
 
@@ -285,11 +304,15 @@ export function OpportunityMap({
             <TooltipContent
               hex={hoverInfo.hex}
               hasCompetition={hasCompetition}
+              competitorBrand={competitorBrand}
               existingCount={brandCountByHex.get(hoverInfo.hex.hex_id)}
             />
           )}
           {hoverInfo.brand && (
-            <BrandTooltipContent brand={hoverInfo.brand} />
+            <BrandTooltipContent
+              brand={hoverInfo.brand}
+              hex={hexById.get(hoverInfo.brand.hex_id)}
+            />
           )}
         </div>
       )}
@@ -318,7 +341,7 @@ export function OpportunityMap({
             </span>
           )}
           <span className="flex items-center gap-1.5">
-            <span className="inline-block h-3 w-3 rounded-full bg-[rgb(0,200,80)]" />
+            <span className="inline-block h-3 w-3 rounded-full border-2 border-white bg-[rgb(0,200,80)]" />
             Top opportunities
           </span>
           <span className="flex items-center gap-1.5">
@@ -331,7 +354,13 @@ export function OpportunityMap({
   );
 }
 
-function BrandTooltipContent({ brand }: { brand: BrandLocationData }) {
+function BrandTooltipContent({
+  brand,
+  hex,
+}: {
+  brand: BrandLocationData;
+  hex?: HexagonData;
+}) {
   const isSource = brand.is_source !== false;
   return (
     <div className="space-y-1">
@@ -343,7 +372,30 @@ function BrandTooltipContent({ brand }: { brand: BrandLocationData }) {
       <div className="grid grid-cols-2 gap-x-3 gap-y-0.5 pt-1">
         <span className="text-muted-foreground">Stores in cell</span>
         <span className="font-medium">{brand.count}</span>
+        {hex && Number.isFinite(hex.poi_density) && (
+          <>
+            <span className="text-muted-foreground">POI Density</span>
+            <span className="font-medium">{hex.poi_density}</span>
+          </>
+        )}
+        {hex?.radiance != null && Number.isFinite(hex.radiance) && (
+          <>
+            <span className="text-muted-foreground">Economic Activity</span>
+            <span className="font-medium">
+              {hex.radiance.toFixed(2)} nW/cm²/sr
+              <span className="ml-1 text-xs text-muted-foreground">
+                ({radianceLabel(hex.radiance)})
+              </span>
+            </span>
+          </>
+        )}
       </div>
+      {hex?.cat_detail && (
+        <div
+          className="pt-1 border-t text-muted-foreground"
+          dangerouslySetInnerHTML={{ __html: hex.cat_detail }}
+        />
+      )}
     </div>
   );
 }
@@ -351,14 +403,16 @@ function BrandTooltipContent({ brand }: { brand: BrandLocationData }) {
 function TooltipContent({
   hex,
   hasCompetition,
+  competitorBrand,
   existingCount,
 }: {
   hex: HexagonData;
   hasCompetition: boolean;
+  competitorBrand?: string;
   existingCount?: number;
 }) {
   const isExistingCell = Boolean(hex.is_brand_cell);
-  const hasPoiCount = Number.isFinite(hex.poi_count);
+  const hasPoiDensity = Number.isFinite(hex.poi_density);
   const hasSimilarity = Number.isFinite(hex.similarity);
   const opportunityScore =
     typeof hex.opportunity_score === "number" ? hex.opportunity_score : null;
@@ -373,49 +427,66 @@ function TooltipContent({
           <>
             <span className="text-muted-foreground">Existing locations</span>
             <span className="font-medium">{existingCount ?? 0}</span>
-            {hasPoiCount && (
+            {hasPoiDensity && (
               <>
-                <span className="text-muted-foreground">POI Count</span>
-                <span className="font-medium">{hex.poi_count}</span>
+                <span className="text-muted-foreground">POI Density</span>
+                <span className="font-medium">{hex.poi_density}</span>
+              </>
+            )}
+            {hex.radiance != null && Number.isFinite(hex.radiance) && (
+              <>
+                <span className="text-muted-foreground">Economic Activity</span>
+                <span className="font-medium">
+                  {hex.radiance.toFixed(2)} nW/cm²/sr
+                  <span className="ml-1 text-xs text-muted-foreground">
+                    ({radianceLabel(hex.radiance)})
+                  </span>
+                </span>
               </>
             )}
           </>
         ) : (
           <>
-            {hasCompetition && hasOpportunity && (
-              <>
-                <span className="text-muted-foreground">Opportunity</span>
-                <span className="font-medium">{(opportunityScore * 100).toFixed(1)}%</span>
-              </>
-            )}
             {hasSimilarity && (
               <>
                 <span className="text-muted-foreground">Similarity</span>
                 <span className="font-medium">{(hex.similarity * 100).toFixed(1)}%</span>
               </>
             )}
-            {hasPoiCount && (
+            {hasPoiDensity && (
               <>
-                <span className="text-muted-foreground">POI Count</span>
-                <span className="font-medium">{hex.poi_count}</span>
+                <span className="text-muted-foreground">POI Density</span>
+                <span className="font-medium">{hex.poi_density}</span>
               </>
             )}
-            {hasCompetition && (
+            {hex.radiance != null && Number.isFinite(hex.radiance) && (
               <>
-                <span className="text-muted-foreground">Competitors</span>
+                <span className="text-muted-foreground">Economic Activity</span>
+                <span className="font-medium">
+                  {hex.radiance.toFixed(2)} nW/cm²/sr
+                  <span className="ml-1 text-xs text-muted-foreground">
+                    ({radianceLabel(hex.radiance)})
+                  </span>
+                </span>
+              </>
+            )}
+            {hasCompetition && (hex.competitor_count ?? 0) > 0 && (
+              <>
+                <span className="text-muted-foreground">Competition</span>
                 <span className="font-medium">{hex.competitor_count}</span>
               </>
             )}
           </>
         )}
       </div>
-      {!isExistingCell && hex.top_competitors && (
+      {!isExistingCell && (hex.competitor_count ?? 0) > 0 && hex.top_competitors && (
         <div className="pt-1 border-t text-muted-foreground">
-          <span className="font-medium text-foreground">Top Competitors: </span>
+          <span className="font-medium text-foreground">
+            {competitorBrand || "Top Competitors"}: </span>
           {hex.top_competitors}
         </div>
       )}
-      {!isExistingCell && hex.cat_detail && (
+      {hex.cat_detail && (
         <div
           className="pt-1 border-t text-muted-foreground"
           dangerouslySetInnerHTML={{ __html: hex.cat_detail }}

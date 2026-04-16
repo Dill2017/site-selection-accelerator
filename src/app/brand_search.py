@@ -193,7 +193,7 @@ def discover_brand_locations(
     """
     _RETURN_COLS = (
         "poi_id, poi_primary_name, basic_category, "
-        "brand_name_primary, lon, lat, "
+        "brand_name_primary, address_line, lon, lat, "
         f"h3_h3tostring(h3_longlatash3(lon, lat, {resolution})) as h3_cell"
     )
     _SPATIAL_HINT = (

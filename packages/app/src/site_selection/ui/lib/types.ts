@@ -47,6 +47,7 @@ export interface AnalyzeRequest {
   brand_input: BrandInput;
   enable_competition: boolean;
   beta: number;
+  competitor_brand: string;
   include_buildings: boolean;
 }
 
@@ -59,7 +60,8 @@ export interface HexagonData {
   lat: number;
   lon: number;
   address: string;
-  poi_count: number;
+  poi_density: number;
+  radiance: number | null;
   competitor_count: number;
   top_competitors: string;
   cat_detail: string;
@@ -74,13 +76,23 @@ export interface BrandLocationData {
   is_source: boolean;
 }
 
+export interface CompetitorLocationData {
+  lat: number;
+  lon: number;
+  hex_id: string;
+  name: string;
+  count: number;
+}
+
 export interface AnalyzeResult {
   session_id: string;
   hexagons: HexagonData[];
   brand_locations: BrandLocationData[];
   existing_target_locations: BrandLocationData[];
+  competitor_locations: CompetitorLocationData[];
   city_polygon_geojson: Record<string, unknown> | null;
   has_competition: boolean;
+  competitor_brand: string;
   analysis_mode: "brand" | "location";
   center_lat: number;
   center_lon: number;
@@ -161,7 +173,7 @@ export interface HexagonDetail {
   address: string;
   similarity: number;
   opportunity_score: number | null;
-  poi_count: number;
+  poi_density: number;
   explanation_summary: string;
   competition: CompetitionInfo | null;
   competitor_pois: CompetitorPOI[];
@@ -223,6 +235,7 @@ export const STEP_LABELS: Record<string, string> = {
   building_vectors: "Building count vectors...",
   generating_embeddings: "Generating embeddings...",
   computing_similarity: "Computing similarity scores...",
+  computing_radiance: "Computing economic activity data...",
   finding_competitors: "Finding competitors...",
   caching_results: "Preparing results...",
   done: "Done!",

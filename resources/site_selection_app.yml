@@ -1,11 +1,16 @@
 resources:
   apps:
     site_selection_app:
-      name: "site-selection-accelerator"
+      name: "site-selection"
       description: "Brand Site Selection Accelerator — find whitespace opportunities using geospatial embeddings"
+      budget_policy_id: "5b62fa02-8671-46d3-96ac-64c1725dc9d9"
       source_code_path: ../packages/app/.build
       resources:
         - name: "sql-warehouse"
           sql_warehouse:
             id: ${var.warehouse_id}
             permission: "CAN_USE"
+        - name: "radiance-job"
+          job:
+            id: ${resources.jobs.radiance_on_demand.id}
+            permission: "CAN_MANAGE_RUN"

@@ -36,7 +36,7 @@ cross-market transfer learning.
 |---|---|
 | **Databricks App** | Interactive full-stack app (React + FastAPI) for running brand site analysis |
 | **ETL Pipeline** | DABs job that builds gold tables from CARTO Overture Maps and trains the Hex2Vec model |
-| **Gold Tables** | `gold_cities`, `gold_places`, `gold_buildings`, `gold_places_enriched` in Unity Catalog |
+| **Gold Tables** | `gold_cities`, `gold_places`, `gold_buildings`, `gold_places_enriched`, `gold_radiance` (optional) in Unity Catalog |
 | **Analysis Tables** | `analyses`, `analysis_hexagons`, `analysis_brand_profiles`, `analysis_fingerprints`, `analysis_competitors` — every analysis run persisted to Delta |
 | **Hex2Vec Model** | Multi-city pretrained geospatial embedding model stored in a UC Volume |
 | **Genie Space** | Natural-language SQL exploration over both the base data and your analysis results |
@@ -96,6 +96,43 @@ The ETL job trains Hex2Vec on a single-node cluster. You **must** set
 | **AWS** | `i3.xlarge` |
 | **Azure** | `Standard_DS3_v2` |
 | **GCP** | `n1-standard-4` |
+
+### Optional: VIIRS Nighttime Lights (Economic Activity Proxy)
+
+The app can optionally display **VIIRS nighttime radiance** per H3 cell as
+a proxy for economic activity. If the data is present, radiance values appear
+in the hex tooltip; if absent, everything still works without it.
+
+The VIIRS annual composite is published by the
+[Earth Observation Group (EOG)](https://eogdata.mines.edu/products/vnl/#annual_v2)
+under **CC BY 4.0** license.
+
+**Steps to enable:**
+
+1. Create a free account at https://eogdata.mines.edu
+2. Download the **Annual VNL V2** `median_masked` GeoTIFF from the EOG website
+   (browser download — the file is ~2-3 GB)
+3. Unzip the `.tif.gz` to get the `.tif` file
+4. Create the Volume (if it doesn't exist):
+   ```sql
+   CREATE VOLUME IF NOT EXISTS <catalog>.<schema>.viirs_nighttime_lights;
+   ```
+5. Upload the `.tif` file to the Volume via the Databricks UI (drag-and-drop)
+   or CLI:
+   ```bash
+   databricks fs cp ./viirs_file.tif dbfs:/Volumes/<catalog>/<schema>/viirs_nighttime_lights/
+   ```
+6. Re-run the ETL job — the `create_gold_radiance` task picks up the file
+   automatically and precomputes radiance for the 37 training cities
+
+The Volume path is derived from the existing `catalog` and `schema` bundle
+variables (`/Volumes/{catalog}/{schema}/viirs_nighttime_lights/`), so no
+additional configuration is needed.
+
+> **Citation (required by CC BY 4.0):**
+> Elvidge, C.D, Zhizhin, M., Ghosh T., Hsu FC, Taneja J. "Annual time
+> series of global VIIRS nighttime lights derived from monthly averages:
+> 2012 to 2019". Remote Sensing 2021, 13(5), p.922
 
 ---
 
@@ -184,7 +221,7 @@ databricks bundle deploy
 > (`hatchling`, `uv-dynamic-versioning`). If your environment blocks PyPI,
 > see [Build in Restricted Environments](#build-in-restricted-environments).
 
-### 5. Run the ETL pipeline
+#### 5. Run the ETL pipeline
 
 This creates the schema, gold tables, analysis tables, Genie Space, and
 pretrained Hex2Vec model — everything the app needs:
@@ -203,6 +240,7 @@ databricks bundle run geospatial_etl_job
 | `create_gold_buildings` | ~3 min | Extracts building footprints from CARTO Buildings |
 | `create_gold_places_enriched` | ~2 min | Full POI table with brands, addresses, coordinates |
 | `create_analysis_tables` | ~5s | DDL for the five analysis result tables |
+| `create_gold_radiance` | ~2 min | *(Optional)* Computes mean VIIRS radiance per H3 cell for training cities. Skips if VIIRS file not uploaded |
 | `setup_genie_space` | ~30s | Creates/updates Genie Space, grants app SP access, writes config |
 | `train_hex2vec` | ~5 min | Trains Hex2Vec embedding model on 37 cities |
 
@@ -412,6 +450,7 @@ site-selection-accelerator/
     │   ├── config.py                     # Table refs, categories, constants
     │   ├── db.py                         # DBSQL execution via SDK
     │   ├── pipeline.py                   # Geospatial queries
+    │   ├── radiance.py                   # VIIRS nighttime radiance processing
     │   ├── embeddings.py                 # SRAI Hex2Vec pipeline
     │   ├── similarity.py                 # Cosine similarity + opportunity scoring
     │   ├── brand_search.py               # Genie brand discovery + competition
@@ -426,6 +465,7 @@ site-selection-accelerator/
             ├── gold_places.sql
             ├── gold_buildings.sql
             ├── gold_places_enriched.sql
+            ├── create_gold_radiance.py   # VIIRS radiance ETL (optional)
             └── analysis_tables.sql       # Analysis result DDL
 ```
 
@@ -460,8 +500,9 @@ The `geospatial_etl_job` runs these tasks in order:
    train from scratch as fallback)
 5. **Similarity scoring** — cosine similarity between brand profile and every
    city cell
-6. **Competition scoring** — find competitor POIs in high-similarity cells and
-   apply `similarity * (1 - β * competition_score)` to surface true whitespace.
+6. **Opportunity scoring** — combines similarity and competition into a
+   single score using `similarity * (1 - beta * competition_score)`,
+   normalised by percentile rank.
 7. **Persist (optional)** — save all results to Delta when the user clicks
    Save Analysis
 

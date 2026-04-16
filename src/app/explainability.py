@@ -124,7 +124,7 @@ def explain_competition(
     cell_id: int,
     scored: pd.DataFrame,
 ) -> dict | None:
-    """Return competition breakdown for a cell, if available."""
+    """Return competition and demand breakdown for a cell, if available."""
     if "opportunity_score" not in scored.columns:
         return None
     row = scored[scored["h3_cell"] == cell_id]

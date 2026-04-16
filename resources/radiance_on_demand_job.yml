@@ -1,0 +1,33 @@
+resources:
+  jobs:
+    radiance_on_demand:
+      name: "[${bundle.target}] Site Selection - On-Demand Radiance"
+      parameters:
+        - name: country
+          default: ""
+        - name: city
+          default: ""
+        - name: resolution
+          default: "9"
+      tasks:
+        - task_key: "compute_radiance"
+          spark_python_task:
+            python_file: ../src/pipeline/transformations/compute_city_radiance.py
+            parameters:
+              - "${var.catalog}"
+              - "${var.schema}"
+              - "${var.warehouse_id}"
+              - "{{job.parameters.country}}"
+              - "{{job.parameters.city}}"
+              - "{{job.parameters.resolution}}"
+              - "${var.viirs_volume_name}"
+          environment_key: "radiance_serverless"
+      environments:
+        - environment_key: "radiance_serverless"
+          spec:
+            client: "5"
+            dependencies:
+              - "databricks-sdk>=0.65.0"
+              - "rasterio"
+              - "h3ronpy"
+              - "geopandas"

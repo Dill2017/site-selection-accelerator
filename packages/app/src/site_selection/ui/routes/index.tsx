@@ -51,6 +51,7 @@ function Index() {
         centerLat={analyzer.result?.center_lat}
         centerLon={analyzer.result?.center_lon}
         hasCompetition={analyzer.result?.has_competition}
+        competitorBrand={analyzer.result?.competitor_brand}
         onHexClick={handleHexClick}
         onMapReady={handleMapReady}
         drawingEnabled={drawingEnabled}
@@ -93,6 +94,7 @@ function Index() {
       <FingerprintPanel
         hex={selectedHex}
         sessionId={sessionId}
+        competitorBrand={analyzer.result?.competitor_brand}
         onClose={() => setSelectedHex(null)}
       />
     </div>
