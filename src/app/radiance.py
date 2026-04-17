@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 
 import pandas as pd
+from databricks.sdk.service.sql import StatementParameterListItem
 
 from config import GOLD_RADIANCE_TABLE, RADIANCE_JOB_ID
 from db import _get_client, execute_query
@@ -31,11 +32,17 @@ def get_radiance_for_city(
         return None
 
     try:
-        df = execute_query(f"""
+        df = execute_query(
+            f"""
             SELECT h3_cell, radiance
             FROM {GOLD_RADIANCE_TABLE}
-            WHERE country = '{country}' AND city_name = '{city}'
-        """)
+            WHERE country = :country AND city_name = :city
+            """,
+            params=[
+                StatementParameterListItem(name="country", value=country),
+                StatementParameterListItem(name="city", value=city),
+            ],
+        )
         if not df.empty:
             log.info("Radiance cache hit: %d cells for %s, %s", len(df), city, country)
             return df

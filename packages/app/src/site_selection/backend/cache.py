@@ -30,6 +30,12 @@ class PipelineResult:
     brand_pois: pd.DataFrame | None = None
     created_at: float = field(default_factory=time.time)
 
+    def compact(self) -> None:
+        """Release large DataFrames that are only needed during analysis."""
+        self.pois_df = pd.DataFrame()
+        self.city_h3_cells_df = pd.DataFrame()
+        self.brand_pois = None
+
 
 _lock = threading.Lock()
 _store: dict[str, PipelineResult] = {}

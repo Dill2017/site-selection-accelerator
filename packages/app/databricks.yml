@@ -12,8 +12,8 @@ artifacts:
 resources:
   apps:
     site-selection-app:
-      name: "site-selection"
-      description: "site-selection created with apx"
+      name: "site-selection-accelerator"
+      description: "Brand Site Selection Accelerator"
       source_code_path: ./.build
 
 targets:

@@ -8,23 +8,28 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 import time
 
 import pandas as pd
 from databricks.sdk import WorkspaceClient
-from databricks.sdk.service.sql import Disposition, Format, StatementState
+from databricks.sdk.service.sql import (
+    Disposition,
+    Format,
+    StatementParameterListItem,
+    StatementState,
+)
 
 log = logging.getLogger(__name__)
-
-WAREHOUSE_ID = os.getenv("DATABRICKS_WAREHOUSE_ID")
 
 _MAX_POLL_ITERATIONS = 150  # ~5 min at 2 s intervals
 
 _client: WorkspaceClient | None = None
+_client_lock = threading.Lock()
 
 
 def _get_client() -> WorkspaceClient:
-    """Return a cached WorkspaceClient.
+    """Return a cached WorkspaceClient (thread-safe double-checked locking).
 
     Strategy:
       1. If DATABRICKS_CONFIG_PROFILE is explicitly set, use that profile
@@ -37,31 +42,36 @@ def _get_client() -> WorkspaceClient:
     if _client is not None:
         return _client
 
-    profile = os.environ.get("DATABRICKS_CONFIG_PROFILE")
-    try:
-        if profile:
-            _client = WorkspaceClient(profile=profile)
-        else:
-            _client = WorkspaceClient()
-    except Exception as exc:
-        raise RuntimeError(
-            f"Failed to initialise WorkspaceClient: {exc}. "
-            "Ensure DATABRICKS_HOST and authentication are configured "
-            "(or set DATABRICKS_CONFIG_PROFILE for local development)."
-        ) from exc
+    with _client_lock:
+        if _client is not None:
+            return _client
 
-    log.info("Initialised WorkspaceClient (warehouse=%s)", WAREHOUSE_ID)
-    return _client
+        profile = os.environ.get("DATABRICKS_CONFIG_PROFILE")
+        try:
+            if profile:
+                _client = WorkspaceClient(profile=profile)
+            else:
+                _client = WorkspaceClient()
+        except Exception as exc:
+            raise RuntimeError(
+                f"Failed to initialise WorkspaceClient: {exc}. "
+                "Ensure DATABRICKS_HOST and authentication are configured "
+                "(or set DATABRICKS_CONFIG_PROFILE for local development)."
+            ) from exc
+
+        log.info("Initialised WorkspaceClient (warehouse=%s)", _validate_warehouse_id())
+        return _client
 
 
 def _validate_warehouse_id() -> str:
-    if not WAREHOUSE_ID:
+    wh_id = os.getenv("DATABRICKS_WAREHOUSE_ID")
+    if not wh_id:
         raise RuntimeError(
             "DATABRICKS_WAREHOUSE_ID is not set. "
             "Ensure the environment variable is configured in app.yml "
             "(via the sql-warehouse resource) or in your local .env file."
         )
-    return WAREHOUSE_ID
+    return wh_id
 
 
 def _wait_for_statement(client: WorkspaceClient, statement_id: str):
@@ -105,11 +115,24 @@ def _cast_columns(df: pd.DataFrame, col_schemas: list) -> pd.DataFrame:
     return df
 
 
-def execute_query(query: str) -> pd.DataFrame:
+def execute_query(
+    query: str,
+    *,
+    params: list[StatementParameterListItem] | None = None,
+    raise_on_truncation: bool = False,
+) -> pd.DataFrame:
     """Run *query* on the SQL warehouse and return a DataFrame.
 
     Handles long-running queries by polling. Uses INLINE disposition
     with maximum byte limit. Fetches all chunks for paginated results.
+
+    Parameters
+    ----------
+    params : list[StatementParameterListItem] | None
+        Named parameters referenced as ``:param_name`` in the query.
+    raise_on_truncation : bool
+        If ``True``, raise instead of returning partial results when the
+        inline byte limit is hit.
     """
     wh_id = _validate_warehouse_id()
     client = _get_client()
@@ -121,6 +144,7 @@ def execute_query(query: str) -> pd.DataFrame:
         disposition=Disposition.INLINE,
         format=Format.JSON_ARRAY,
         byte_limit=26214400,
+        parameters=params,
     )
 
     state = resp.status.state if resp.status else None
@@ -161,6 +185,12 @@ def execute_query(query: str) -> pd.DataFrame:
 
     if is_truncated:
         log.warning("Result TRUNCATED: got %d of %s rows", len(all_rows), total_expected)
+        if raise_on_truncation:
+            raise RuntimeError(
+                f"Query results truncated by the 25 MB inline byte limit: "
+                f"received {len(all_rows)} of {total_expected} rows. "
+                f"Narrow the query or increase the byte_limit."
+            )
 
     df = pd.DataFrame(all_rows, columns=columns)
     df = _cast_columns(df, col_schemas)

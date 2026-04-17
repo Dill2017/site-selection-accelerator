@@ -885,6 +885,7 @@ async def persist_analysis(session_id: str):
             center_lat=center_lat,
             center_lon=center_lon,
         )
+        pr.compact()
         return PersistResultOut(
             analysis_id=result["analysis_id"],
             tables_written=result["tables_written"],
@@ -931,6 +932,7 @@ async def persist_analysis_with_context(session_id: str, req: AnalyzeRequest):
             center_lat=center_lat,
             center_lon=center_lon,
         )
+        pr.compact()
         return PersistResultOut(
             analysis_id=result["analysis_id"],
             tables_written=result["tables_written"],

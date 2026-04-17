@@ -12,12 +12,19 @@ from __future__ import annotations
 import h3 as _h3
 import pandas as pd
 
+from databricks.sdk.service.sql import StatementParameterListItem
+
 from config import (
     GOLD_BUILDINGS_TABLE,
     GOLD_CITIES_TABLE,
     GOLD_PLACES_TABLE,
 )
 from db import execute_query
+
+
+def _param(name: str, value: str | int | float, type_: str = "STRING") -> StatementParameterListItem:
+    """Shorthand for building a named SQL parameter."""
+    return StatementParameterListItem(name=name, value=str(value), type=type_)
 
 
 # ── Lookup helpers (populate dropdowns) ─────────────────────────────────────
@@ -38,10 +45,10 @@ def get_cities(country: str) -> list[str]:
     query = f"""
         SELECT DISTINCT city_name
         FROM {GOLD_CITIES_TABLE}
-        WHERE country = '{country}'
+        WHERE country = :country
         ORDER BY city_name
     """
-    return execute_query(query)["city_name"].tolist()
+    return execute_query(query, params=[_param("country", country)])["city_name"].tolist()
 
 
 # ── Core pipeline queries ───────────────────────────────────────────────────
@@ -55,10 +62,13 @@ def get_city_polygon(country: str, city: str) -> dict:
     query = f"""
         SELECT geom_wkt, has_polygon
         FROM {GOLD_CITIES_TABLE}
-        WHERE country = '{country}' AND city_name = '{city}'
+        WHERE country = :country AND city_name = :city
         LIMIT 1
     """
-    df = execute_query(query)
+    df = execute_query(query, params=[
+        _param("country", country),
+        _param("city", city),
+    ])
     if df.empty:
         raise ValueError(f"City not found: {city}, {country}")
     return df.iloc[0].to_dict()
@@ -76,11 +86,11 @@ def tessellate_city(country: str, city: str, resolution: int) -> pd.DataFrame:
         WITH city_poly AS (
             SELECT geom_wkt
             FROM {GOLD_CITIES_TABLE}
-            WHERE country = '{country}' AND city_name = '{city}'
+            WHERE country = :country AND city_name = :city
             LIMIT 1
         ),
         cells AS (
-            SELECT explode(h3_polyfillash3(geom_wkt, {resolution})) AS h3_cell
+            SELECT explode(h3_polyfillash3(geom_wkt, :resolution)) AS h3_cell
             FROM city_poly
         )
         SELECT
@@ -89,7 +99,18 @@ def tessellate_city(country: str, city: str, resolution: int) -> pd.DataFrame:
             CAST(h3_centerasgeojson(h3_cell):coordinates[0] AS DOUBLE) AS center_lon
         FROM cells
     """
-    return execute_query(query)
+    return execute_query(query, params=[
+        _param("country", country),
+        _param("city", city),
+        _param("resolution", resolution, "INT"),
+    ])
+
+
+def _cat_params(categories: list[str]) -> tuple[str, list[StatementParameterListItem]]:
+    """Build parameterized IN-list placeholders for category values."""
+    placeholders = ", ".join(f":cat_{i}" for i in range(len(categories)))
+    params = [_param(f"cat_{i}", c) for i, c in enumerate(categories)]
+    return placeholders, params
 
 
 def get_pois_with_h3(
@@ -108,17 +129,17 @@ def get_pois_with_h3(
     Returns DataFrame with columns:
         poi_id, category, lon, lat, address, h3_cell
     """
-    cat_list = ", ".join(f"'{c}'" for c in categories)
+    cat_placeholders, cat_params = _cat_params(categories)
     query = f"""
         WITH city AS (
             SELECT geom_wkt,
                    bbox_xmin, bbox_xmax, bbox_ymin, bbox_ymax
             FROM {GOLD_CITIES_TABLE}
-            WHERE country = '{country}' AND city_name = '{city}'
+            WHERE country = :country AND city_name = :city
             LIMIT 1
         ),
         city_h3 AS (
-            SELECT explode(h3_polyfillash3(geom_wkt, {resolution})) AS h3_cell
+            SELECT explode(h3_polyfillash3(geom_wkt, :resolution)) AS h3_cell
             FROM city
         ),
         bbox_pois AS (
@@ -128,18 +149,23 @@ def get_pois_with_h3(
                 p.lon,
                 p.lat,
                 p.address,
-                h3_longlatash3(p.lon, p.lat, {resolution}) AS h3_cell
+                h3_longlatash3(p.lon, p.lat, :resolution) AS h3_cell
             FROM {GOLD_PLACES_TABLE} p
             CROSS JOIN city c
             WHERE p.lon BETWEEN c.bbox_xmin AND c.bbox_xmax
               AND p.lat BETWEEN c.bbox_ymin AND c.bbox_ymax
-              AND p.category IN ({cat_list})
+              AND p.category IN ({cat_placeholders})
         )
         SELECT b.*
         FROM bbox_pois b
         INNER JOIN city_h3 ch ON b.h3_cell = ch.h3_cell
     """
-    return execute_query(query)
+    return execute_query(query, params=[
+        _param("country", country),
+        _param("city", city),
+        _param("resolution", resolution, "INT"),
+        *cat_params,
+    ], raise_on_truncation=True)
 
 
 def get_buildings_with_h3(
@@ -162,11 +188,11 @@ def get_buildings_with_h3(
             SELECT geom_wkt,
                    bbox_xmin, bbox_xmax, bbox_ymin, bbox_ymax
             FROM {GOLD_CITIES_TABLE}
-            WHERE country = '{country}' AND city_name = '{city}'
+            WHERE country = :country AND city_name = :city
             LIMIT 1
         ),
         city_h3 AS (
-            SELECT explode(h3_polyfillash3(geom_wkt, {resolution})) AS h3_cell
+            SELECT explode(h3_polyfillash3(geom_wkt, :resolution)) AS h3_cell
             FROM city
         ),
         bbox_bldg AS (
@@ -186,7 +212,11 @@ def get_buildings_with_h3(
         FROM bbox_bldg bb
         INNER JOIN city_h3 ch ON bb.h3_cell = ch.h3_cell
     """
-    return execute_query(query)
+    return execute_query(query, params=[
+        _param("country", country),
+        _param("city", city),
+        _param("resolution", resolution, "INT"),
+    ], raise_on_truncation=True)
 
 
 def get_buildings_around_points(
@@ -212,6 +242,8 @@ def get_buildings_around_points(
 
     seen_centers: set[str] = set()
     bbox_clauses: list[str] = []
+    bbox_params: list[StatementParameterListItem] = []
+    idx = 0
     for loc in locations:
         center_hex = _h3.latlng_to_cell(loc["lat"], loc["lon"], resolution)
         if center_hex in seen_centers:
@@ -222,9 +254,16 @@ def get_buildings_around_points(
         lats, lons = zip(*[_h3.cell_to_latlng(h) for h in disk])
         pad = 0.005
         bbox_clauses.append(
-            f"(bbox_xmin >= {min(lons) - pad} AND bbox_xmax <= {max(lons) + pad} "
-            f"AND bbox_ymin >= {min(lats) - pad} AND bbox_ymax <= {max(lats) + pad})"
+            f"(bbox_xmin <= :xmax_{idx} AND bbox_xmax >= :xmin_{idx} "
+            f"AND bbox_ymin <= :ymax_{idx} AND bbox_ymax >= :ymin_{idx})"
         )
+        bbox_params.extend([
+            _param(f"xmin_{idx}", min(lons) - pad, "DOUBLE"),
+            _param(f"xmax_{idx}", max(lons) + pad, "DOUBLE"),
+            _param(f"ymin_{idx}", min(lats) - pad, "DOUBLE"),
+            _param(f"ymax_{idx}", max(lats) + pad, "DOUBLE"),
+        ])
+        idx += 1
 
     bbox_filter = " OR ".join(bbox_clauses)
     query = f"""
@@ -238,7 +277,7 @@ def get_buildings_around_points(
         FROM {GOLD_BUILDINGS_TABLE}
         WHERE ({bbox_filter})
     """
-    bldg_df = execute_query(query)
+    bldg_df = execute_query(query, params=bbox_params)
     bldg_df = bldg_df[bldg_df["h3_cell"].isin(cell_set)]
     return bldg_df
 
@@ -330,10 +369,12 @@ def get_pois_around_points(
 
     cell_set = set(h3_cells_df["h3_cell"].tolist())
 
-    cat_list = ", ".join(f"'{c}'" for c in categories)
+    cat_placeholders, cat_p = _cat_params(categories)
 
     seen_centers: set[str] = set()
     bbox_clauses: list[str] = []
+    bbox_params: list[StatementParameterListItem] = []
+    idx = 0
     for loc in locations:
         center_hex = _h3.latlng_to_cell(loc["lat"], loc["lon"], resolution)
         if center_hex in seen_centers:
@@ -344,9 +385,16 @@ def get_pois_around_points(
         lats, lons = zip(*[_h3.cell_to_latlng(h) for h in disk])
         pad = 0.005
         bbox_clauses.append(
-            f"(bbox_xmin >= {min(lons) - pad} AND bbox_xmax <= {max(lons) + pad} "
-            f"AND bbox_ymin >= {min(lats) - pad} AND bbox_ymax <= {max(lats) + pad})"
+            f"(bbox_xmin <= :xmax_{idx} AND bbox_xmax >= :xmin_{idx} "
+            f"AND bbox_ymin <= :ymax_{idx} AND bbox_ymax >= :ymin_{idx})"
         )
+        bbox_params.extend([
+            _param(f"xmin_{idx}", min(lons) - pad, "DOUBLE"),
+            _param(f"xmax_{idx}", max(lons) + pad, "DOUBLE"),
+            _param(f"ymin_{idx}", min(lats) - pad, "DOUBLE"),
+            _param(f"ymax_{idx}", max(lats) + pad, "DOUBLE"),
+        ])
+        idx += 1
 
     bbox_filter = " OR ".join(bbox_clauses)
     query = f"""
@@ -356,12 +404,16 @@ def get_pois_around_points(
             lon,
             lat,
             address,
-            h3_longlatash3(lon, lat, {resolution}) AS h3_cell
+            h3_longlatash3(lon, lat, :resolution) AS h3_cell
         FROM {GOLD_PLACES_TABLE}
         WHERE ({bbox_filter})
-          AND category IN ({cat_list})
+          AND category IN ({cat_placeholders})
     """
-    pois_df = execute_query(query)
+    pois_df = execute_query(query, params=[
+        _param("resolution", resolution, "INT"),
+        *cat_p,
+        *bbox_params,
+    ], raise_on_truncation=True)
     pois_df = pois_df[pois_df["h3_cell"].isin(cell_set)]
     return h3_cells_df, pois_df
 
@@ -386,14 +438,19 @@ def tessellate_cities(
     (deduplicated across cities).
     """
     union_parts: list[str] = []
-    for country, city in city_specs:
+    city_params: list[StatementParameterListItem] = []
+    for i, (country, city) in enumerate(city_specs):
         union_parts.append(f"""
-            SELECT explode(h3_polyfillash3(geom_wkt, {resolution})) AS h3_cell
+            SELECT explode(h3_polyfillash3(geom_wkt, :resolution)) AS h3_cell
             FROM {GOLD_CITIES_TABLE}
-            WHERE country = '{country}' AND city_name = '{city}'
+            WHERE country = :country_{i} AND city_name = :city_{i}
         """)
+        city_params.extend([
+            _param(f"country_{i}", country),
+            _param(f"city_{i}", city),
+        ])
 
-    union_sql = " UNION ".join(union_parts)
+    union_sql = " UNION ALL ".join(union_parts)
 
     query = f"""
         WITH all_cells AS ({union_sql})
@@ -403,7 +460,10 @@ def tessellate_cities(
             CAST(h3_centerasgeojson(h3_cell):coordinates[0] AS DOUBLE) AS center_lon
         FROM all_cells
     """
-    return execute_query(query)
+    return execute_query(query, params=[
+        _param("resolution", resolution, "INT"),
+        *city_params,
+    ])
 
 
 def get_pois_for_cells(
@@ -419,12 +479,12 @@ def get_pois_for_cells(
     Returns DataFrame with columns: poi_id, category, lon, lat, address, h3_cell
     """
     cell_set = set(h3_cells_df["h3_cell"].tolist())
-    lat_min = h3_cells_df["center_lat"].min() - 0.05
-    lat_max = h3_cells_df["center_lat"].max() + 0.05
-    lon_min = h3_cells_df["center_lon"].min() - 0.05
-    lon_max = h3_cells_df["center_lon"].max() + 0.05
+    lat_min = float(h3_cells_df["center_lat"].min() - 0.05)
+    lat_max = float(h3_cells_df["center_lat"].max() + 0.05)
+    lon_min = float(h3_cells_df["center_lon"].min() - 0.05)
+    lon_max = float(h3_cells_df["center_lon"].max() + 0.05)
 
-    cat_list = ", ".join(f"'{c}'" for c in categories)
+    cat_placeholders, cat_p = _cat_params(categories)
 
     query = f"""
         SELECT
@@ -433,13 +493,20 @@ def get_pois_for_cells(
             lon,
             lat,
             address,
-            h3_longlatash3(lon, lat, {resolution}) AS h3_cell
+            h3_longlatash3(lon, lat, :resolution) AS h3_cell
         FROM {GOLD_PLACES_TABLE}
-        WHERE lon BETWEEN {lon_min} AND {lon_max}
-          AND lat BETWEEN {lat_min} AND {lat_max}
-          AND category IN ({cat_list})
+        WHERE lon BETWEEN :lon_min AND :lon_max
+          AND lat BETWEEN :lat_min AND :lat_max
+          AND category IN ({cat_placeholders})
     """
-    pois_df = execute_query(query)
+    pois_df = execute_query(query, params=[
+        _param("resolution", resolution, "INT"),
+        _param("lon_min", lon_min, "DOUBLE"),
+        _param("lon_max", lon_max, "DOUBLE"),
+        _param("lat_min", lat_min, "DOUBLE"),
+        _param("lat_max", lat_max, "DOUBLE"),
+        *cat_p,
+    ], raise_on_truncation=True)
     return pois_df[pois_df["h3_cell"].isin(cell_set)].reset_index(drop=True)
 
 
@@ -453,10 +520,10 @@ def get_buildings_for_cells(
         building_id, building_category, height_bin, lon, lat, h3_cell
     """
     cell_set = set(h3_cells_df["h3_cell"].tolist())
-    lat_min = h3_cells_df["center_lat"].min() - 0.05
-    lat_max = h3_cells_df["center_lat"].max() + 0.05
-    lon_min = h3_cells_df["center_lon"].min() - 0.05
-    lon_max = h3_cells_df["center_lon"].max() + 0.05
+    lat_min = float(h3_cells_df["center_lat"].min() - 0.05)
+    lat_max = float(h3_cells_df["center_lat"].max() + 0.05)
+    lon_min = float(h3_cells_df["center_lon"].min() - 0.05)
+    lon_max = float(h3_cells_df["center_lon"].max() + 0.05)
 
     query = f"""
         SELECT
@@ -467,10 +534,15 @@ def get_buildings_for_cells(
             lat,
             h3_cell
         FROM {GOLD_BUILDINGS_TABLE}
-        WHERE lon BETWEEN {lon_min} AND {lon_max}
-          AND lat BETWEEN {lat_min} AND {lat_max}
+        WHERE lon BETWEEN :lon_min AND :lon_max
+          AND lat BETWEEN :lat_min AND :lat_max
     """
-    bldg_df = execute_query(query)
+    bldg_df = execute_query(query, params=[
+        _param("lon_min", lon_min, "DOUBLE"),
+        _param("lon_max", lon_max, "DOUBLE"),
+        _param("lat_min", lat_min, "DOUBLE"),
+        _param("lat_max", lat_max, "DOUBLE"),
+    ], raise_on_truncation=True)
     return bldg_df[bldg_df["h3_cell"].isin(cell_set)].reset_index(drop=True)
 
 
@@ -481,15 +553,21 @@ def validate_training_cities(
 
     Returns (found, missing) lists.
     """
-    placeholders = ", ".join(
-        f"('{country}', '{city}')" for country, city in city_specs
+    row_placeholders = ", ".join(
+        f"(:vc_{i}, :vn_{i})" for i in range(len(city_specs))
     )
+    city_params = []
+    for i, (country, city) in enumerate(city_specs):
+        city_params.extend([
+            _param(f"vc_{i}", country),
+            _param(f"vn_{i}", city),
+        ])
     query = f"""
         SELECT DISTINCT country, city_name
         FROM {GOLD_CITIES_TABLE}
-        WHERE (country, city_name) IN ({placeholders})
+        WHERE (country, city_name) IN ({row_placeholders})
     """
-    df = execute_query(query)
+    df = execute_query(query, params=city_params)
     found_set = set(zip(df["country"], df["city_name"]))
     found = [cs for cs in city_specs if cs in found_set]
     missing = [cs for cs in city_specs if cs not in found_set]

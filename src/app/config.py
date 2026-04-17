@@ -30,6 +30,8 @@ APP_CONFIG_TABLE = f"{_CATALOG}.{_SCHEMA}.app_config"
 
 GOLD_RADIANCE_TABLE = f"{_CATALOG}.{_SCHEMA}.gold_radiance"
 
+TMP_VOLUME_PATH = f"/Volumes/{_CATALOG}/{_SCHEMA}/tmp"
+
 RADIANCE_JOB_ID = os.getenv("RADIANCE_JOB_ID", "")
 
 ANALYSES_TABLE = f"{_CATALOG}.{_SCHEMA}.analyses"
