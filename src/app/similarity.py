@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import h3
+import numpy as np
 import pandas as pd
 from sklearn.metrics.pairwise import cosine_similarity
 
 from brand_search import h3_int_to_hex
+
+_NEIGHBOR_DECAY = 0.5
 
 
 def _locate_brand_cells(
@@ -39,9 +42,12 @@ def compute_similarity(
     """Score every H3 cell by similarity to the brand profile.
 
     1. Identify H3 cells that contain the brand's existing locations.
-    2. Average those embeddings -> brand profile vector.
-    3. Compute cosine similarity of every other cell to the profile.
-    4. Exclude cells that already contain a brand location.
+    2. Expand each brand cell to its k=1 ring neighbors (that exist in
+       the embedding index) with distance-weighted decay so the actual
+       brand cell dominates while nearby context smooths sparse cells.
+    3. Compute the weighted-mean embedding -> brand profile vector.
+    4. Compute cosine similarity of every cell to the profile.
+    5. Exclude cells that already contain a brand location.
 
     Returns
     -------
@@ -60,7 +66,22 @@ def compute_similarity(
             "categories or a coarser H3 resolution."
         )
 
-    brand_profile = embeddings.loc[brand_cells_in_emb].mean(axis=0).values.reshape(1, -1)
+    emb_index_set = set(embeddings.index)
+    expanded: dict[int, float] = {}
+    for c in brand_cells_in_emb:
+        hex_str = h3.int_to_str(c)
+        for neighbor in h3.grid_disk(hex_str, 1):
+            n_int = h3.str_to_int(neighbor)
+            if n_int in emb_index_set:
+                dist = h3.grid_distance(hex_str, neighbor)
+                w = 1.0 if dist == 0 else _NEIGHBOR_DECAY
+                expanded[n_int] = max(expanded.get(n_int, 0.0), w)
+
+    cells = list(expanded.keys())
+    weights = np.array([expanded[c] for c in cells])
+    brand_profile = np.average(
+        embeddings.loc[cells].values, axis=0, weights=weights,
+    ).reshape(1, -1)
     all_vectors = embeddings.values
     scores = cosine_similarity(brand_profile, all_vectors).flatten()
 

@@ -75,7 +75,7 @@ export function ConfigSidebar({
   const [selectedCats, setSelectedCats] = useState<Set<string>>(new Set());
   const [brandMode, setBrandMode] = useState<BrandMode>("brand_name");
   const [brandValue, setBrandValue] = useState("");
-  const [enableCompetition, setEnableCompetition] = useState(true);
+  const [enableCompetition, setEnableCompetition] = useState(false);
   const [beta, setBeta] = useState(1.0);
   const [competitorBrand, setCompetitorBrand] = useState("");
   const [includeBuildings, setIncludeBuildings] = useState(true);
@@ -89,7 +89,7 @@ export function ConfigSidebar({
   const [selectedPoiIds, setSelectedPoiIds] = useState<Set<string>>(new Set());
   const [isResolving, setIsResolving] = useState(false);
   const [resolvedFor, setResolvedFor] = useState("");
-  const needsDisambiguation = brandMode === "addresses" && resolvedAddresses.some((a) => a.pois.length > 1);
+  const needsDisambiguation = brandMode === "addresses" && enableCompetition && resolvedAddresses.some((a) => a.pois.length > 1);
 
   useEffect(() => {
     setSavedAnalysisId(null);
@@ -184,6 +184,7 @@ export function ConfigSidebar({
   const mapFeatureTotal = drawnFeatureCounts.points + drawnFeatureCounts.polygons;
 
   const addressBlocked =
+    enableCompetition &&
     brandMode === "addresses" &&
     !!brandValue.trim() &&
     (isResolving || resolvedFor !== brandValue || (needsDisambiguation && selectedPoiIds.size === 0));
@@ -219,10 +220,10 @@ export function ConfigSidebar({
   }, [resolution]);
 
   useEffect(() => {
-    if (brandMode !== "addresses" || !brandValue.trim() || brandValue === resolvedFor) return;
+    if (!enableCompetition || brandMode !== "addresses" || !brandValue.trim() || brandValue === resolvedFor) return;
     const timer = setTimeout(() => resolveAddresses(brandValue), 1500);
     return () => clearTimeout(timer);
-  }, [brandValue, brandMode, resolvedFor, resolveAddresses]);
+  }, [brandValue, brandMode, resolvedFor, resolveAddresses, enableCompetition]);
 
   const togglePoiId = useCallback((poiId: string) => {
     setSelectedPoiIds((prev) => {
@@ -444,7 +445,7 @@ export function ConfigSidebar({
                   className="text-sm"
                   rows={3}
                 />
-                {brandMode === "addresses" && isResolving && (
+                {brandMode === "addresses" && enableCompetition && isResolving && (
                   <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
                     <Loader2 className="h-3 w-3 animate-spin" />
                     Resolving addresses...
@@ -498,7 +499,14 @@ export function ConfigSidebar({
               <Label className="text-xs font-medium text-muted-foreground">Competition</Label>
               <Switch
                 checked={enableCompetition}
-                onCheckedChange={setEnableCompetition}
+                onCheckedChange={(v) => {
+                  setEnableCompetition(v);
+                  if (!v) {
+                    setResolvedAddresses([]);
+                    setSelectedPoiIds(new Set());
+                    setResolvedFor("");
+                  }
+                }}
               />
             </div>
             {enableCompetition && (

@@ -302,19 +302,20 @@ async def analyze(req: AnalyzeRequest) -> StreamingResponse:
                 if not brand_locations:
                     yield _sse({"type": "error", "message": "No valid locations parsed"})
                     return
-                brand_pois_df = infer_location_categories(
-                    brand_locations, req.resolution, req.country, req.city,
-                    restrict_to_target_city=False,
-                )
-                if (
-                    req.brand_input.selected_poi_ids
-                    and brand_pois_df is not None
-                    and not brand_pois_df.empty
-                    and "poi_id" in brand_pois_df.columns
-                ):
-                    brand_pois_df = brand_pois_df[
-                        brand_pois_df["poi_id"].astype(str).isin(req.brand_input.selected_poi_ids)
-                    ]
+                if req.enable_competition and req.beta != 0:
+                    brand_pois_df = infer_location_categories(
+                        brand_locations, req.resolution, req.country, req.city,
+                        restrict_to_target_city=False,
+                    )
+                    if (
+                        req.brand_input.selected_poi_ids
+                        and brand_pois_df is not None
+                        and not brand_pois_df.empty
+                        and "poi_id" in brand_pois_df.columns
+                    ):
+                        brand_pois_df = brand_pois_df[
+                            brand_pois_df["poi_id"].astype(str).isin(req.brand_input.selected_poi_ids)
+                        ]
 
             # For address/latlng cross-region: find existing brand in target city
             existing_target_locs: list[dict] = []
