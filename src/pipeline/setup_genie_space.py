@@ -1,20 +1,38 @@
-"""Provision (or locate) the Genie Space for the Site Selection app.
+# Databricks notebook source
 
-Runs as a DABs job task after the gold tables are created.
-If a Genie Space with the expected name already exists, its ID is
-reused and its instructions are updated; otherwise a new one is created.
+# COMMAND ----------
 
-The space_id is written to a small key-value table so the app can
-read it at startup without hard-coding IDs.
+# MAGIC %md
+# MAGIC # Setup Genie Space
+# MAGIC Provision (or update) the Genie Space for the Site Selection app.
+# MAGIC
+# MAGIC If a Genie Space with the expected name already exists, its ID is
+# MAGIC reused and its full configuration (tables, instructions, sample questions)
+# MAGIC is updated; otherwise a new one is created.
+# MAGIC
+# MAGIC The space_id is written to a small key-value table so the app can
+# MAGIC read it at startup without hard-coding IDs.
 
-Uses the REST API for space CRUD (create/update) since the SDK's
-GenieAPI only covers conversations, not space management.
+# COMMAND ----------
 
-End users can also run this script directly:
-    python setup_genie_space.py <catalog> <schema> <warehouse_id>
-Or with env vars (loads from .env):
-    python setup_genie_space.py
-"""
+dbutils.widgets.text("catalog", "")
+dbutils.widgets.text("schema", "")
+dbutils.widgets.text("warehouse_id", "")
+
+catalog = dbutils.widgets.get("catalog")
+schema = dbutils.widgets.get("schema")
+warehouse_id = dbutils.widgets.get("warehouse_id")
+
+print(f"Catalog:      {catalog}")
+print(f"Schema:       {schema}")
+print(f"Warehouse ID: {warehouse_id}")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Imports & Constants
+
+# COMMAND ----------
 
 import json
 import logging
@@ -32,28 +50,37 @@ GENIE_DESCRIPTION = (
     "gold_cities for fast spatial filtering."
 )
 
+# COMMAND ----------
 
-def _build_serialized_space(catalog: str, schema: str, include_analysis_tables: bool = True) -> str:
+# MAGIC %md
+# MAGIC ## Build Serialized Space
+
+# COMMAND ----------
+
+def _build_serialized_space(catalog: str, schema: str, existing_tables: set[str] | None = None) -> str:
     """Build the full serialized_space JSON with tables, instructions,
     and sample question-SQL pairs."""
     enriched_table = f"{catalog}.{schema}.gold_places_enriched"
     cities_table = f"{catalog}.{schema}.gold_cities"
+    buildings_table = f"{catalog}.{schema}.gold_buildings"
+    radiance_table = f"{catalog}.{schema}.gold_radiance"
 
-    tables = [
-        {"identifier": cities_table},
-        {"identifier": enriched_table},
+    candidate_tables = [cities_table, enriched_table, buildings_table, radiance_table]
+    if existing_tables is not None:
+        candidate_tables = [t for t in candidate_tables if t in existing_tables]
+    tables = [{"identifier": t} for t in candidate_tables]
+
+    analysis_table_names = [
+        "analyses",
+        "analysis_brand_profiles",
+        "analysis_hexagons",
+        "analysis_fingerprints",
+        "analysis_competitors",
     ]
-
-    if include_analysis_tables:
-        analysis_table_names = [
-            "analyses",
-            "analysis_brand_profiles",
-            "analysis_hexagons",
-            "analysis_fingerprints",
-            "analysis_competitors",
-        ]
-        for t in analysis_table_names:
-            tables.append({"identifier": f"{catalog}.{schema}.{t}"})
+    for t in analysis_table_names:
+        fqn = f"{catalog}.{schema}.{t}"
+        if existing_tables is None or fqn in existing_tables:
+            tables.append({"identifier": fqn})
 
     return json.dumps({
         "version": 2,
@@ -81,6 +108,20 @@ def _build_serialized_space(catalog: str, schema: str, include_analysis_tables: 
                     "question": [
                         "List distinct brand_name_primary for hotels "
                         "within the Manchester, GB city polygon"
+                    ],
+                },
+                {
+                    "id": uuid.uuid4().hex[:32],
+                    "question": [
+                        "Show the top 10 highest-similarity hexagons "
+                        "from the most recent analysis"
+                    ],
+                },
+                {
+                    "id": uuid.uuid4().hex[:32],
+                    "question": [
+                        "How many analyses have been run, and for which "
+                        "brands and cities?"
                     ],
                 },
             ],
@@ -161,6 +202,16 @@ def _build_serialized_space(catalog: str, schema: str, include_analysis_tables: 
                         "a.analysis_id = h.analysis_id WHERE "
                         "a.brand_input_value ILIKE '%Starbucks%' "
                         "ORDER BY h.similarity DESC LIMIT 10\n",
+                        "\n",
+                        "RADIANCE DATA:\n",
+                        f"  {catalog}.{schema}.gold_radiance — VIIRS "
+                        "nighttime radiance per H3 cell. Join on h3_cell "
+                        "to get economic activity context.\n",
+                        "\n",
+                        "BUILDINGS DATA:\n",
+                        f"  {catalog}.{schema}.gold_buildings — building "
+                        "footprints with type (residential, commercial, etc.) "
+                        "and height bins. Pre-computed h3_cell at resolution 9.\n",
                     ],
                 },
             ],
@@ -199,6 +250,12 @@ def _build_serialized_space(catalog: str, schema: str, include_analysis_tables: 
         },
     })
 
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## REST API Helpers
+
+# COMMAND ----------
 
 def _api(w: WorkspaceClient, method: str, path: str, body: dict | None = None):
     """Thin wrapper around the SDK's API client for REST calls."""
@@ -221,15 +278,43 @@ def _find_existing_space(w: WorkspaceClient) -> str | None:
         log.warning("Could not list Genie Spaces: %s", e)
     return None
 
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Space CRUD
+
+# COMMAND ----------
+
+def _discover_existing_tables(w: WorkspaceClient, warehouse_id: str, catalog: str, schema: str) -> set[str]:
+    """Return the set of fully-qualified table names that exist in the schema."""
+    from databricks.sdk.service.sql import StatementState
+    try:
+        resp = w.statement_execution.execute_statement(
+            warehouse_id=warehouse_id,
+            statement=f"SHOW TABLES IN `{catalog}`.`{schema}`",
+            wait_timeout="30s",
+        )
+        if resp.status and resp.status.state == StatementState.SUCCEEDED and resp.result:
+            tables = set()
+            for row in (resp.result.data_array or []):
+                if row and len(row) >= 2:
+                    tables.add(f"{catalog}.{schema}.{row[1]}")
+            log.info("Discovered %d tables in %s.%s", len(tables), catalog, schema)
+            return tables
+    except Exception as e:
+        log.warning("Could not discover tables: %s", e)
+    return set()
+
 
 def _create_space(
     w: WorkspaceClient,
     catalog: str,
     schema: str,
     warehouse_id: str,
+    existing_tables: set[str] | None = None,
 ) -> str:
     """Create a new Genie Space via REST API and return its ID."""
-    serialized = _build_serialized_space(catalog, schema)
+    serialized = _build_serialized_space(catalog, schema, existing_tables)
 
     resp = _api(w, "POST", "/api/2.0/genie/spaces", {
         "warehouse_id": warehouse_id,
@@ -242,22 +327,31 @@ def _create_space(
     return space_id
 
 
-def _update_space_instructions(
+def _update_space(
     w: WorkspaceClient,
     space_id: str,
     catalog: str,
     schema: str,
+    existing_tables: set[str] | None = None,
 ) -> None:
-    """Update an existing Genie Space with the latest instructions."""
-    serialized = _build_serialized_space(catalog, schema)
+    """Update an existing Genie Space with the latest tables, instructions, and sample questions."""
+    serialized = _build_serialized_space(catalog, schema, existing_tables)
     try:
         _api(w, "PATCH", f"/api/2.0/genie/spaces/{space_id}", {
+            "title": GENIE_DISPLAY_NAME,
+            "description": GENIE_DESCRIPTION,
             "serialized_space": serialized,
         })
-        log.info("Updated instructions for Genie Space: %s", space_id)
+        log.info("Updated Genie Space: %s", space_id)
     except Exception as e:
-        log.warning("Could not update space instructions: %s", e)
+        log.warning("Could not update space: %s", e)
 
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Permissions & Persistence
+
+# COMMAND ----------
 
 def _persist_space_id(
     w: WorkspaceClient,
@@ -362,43 +456,38 @@ def _grant_app_sp_schema_access(
     except Exception as e:
         log.warning("Could not grant schema access to app SP: %s", e)
 
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Main
+
+# COMMAND ----------
 
 def main(catalog: str, schema: str, warehouse_id: str) -> str:
-    """Ensure the Genie Space exists, update instructions, and return its ID."""
+    """Ensure the Genie Space exists, update configuration, and return its ID."""
     w = WorkspaceClient()
+
+    existing_tables = _discover_existing_tables(w, warehouse_id, catalog, schema)
 
     space_id = _find_existing_space(w)
     if space_id:
-        _update_space_instructions(w, space_id, catalog, schema)
+        _update_space(w, space_id, catalog, schema, existing_tables)
     else:
-        space_id = _create_space(w, catalog, schema, warehouse_id)
+        space_id = _create_space(w, catalog, schema, warehouse_id, existing_tables)
 
     _grant_app_sp_access(w, space_id)
     _grant_app_sp_schema_access(w, catalog, schema, warehouse_id)
     _persist_space_id(w, catalog, schema, space_id, warehouse_id)
     return space_id
 
+# COMMAND ----------
 
-if __name__ == "__main__":
-    import sys
+# MAGIC %md
+# MAGIC ## Execute
 
-    logging.basicConfig(level=logging.INFO)
+# COMMAND ----------
 
-    try:
-        from databricks.sdk.runtime import dbutils  # type: ignore[import]
-        catalog = dbutils.widgets.get("catalog")
-        schema = dbutils.widgets.get("schema")
-        warehouse_id = dbutils.widgets.get("warehouse_id")
-    except Exception:
-        if len(sys.argv) >= 4:
-            catalog, schema, warehouse_id = sys.argv[1], sys.argv[2], sys.argv[3]
-        else:
-            import os
-            from dotenv import load_dotenv
-            load_dotenv()
-            catalog = os.getenv("GOLD_CATALOG", "")
-            schema = os.getenv("GOLD_SCHEMA", "")
-            warehouse_id = os.getenv("DATABRICKS_WAREHOUSE_ID", "")
+logging.basicConfig(level=logging.INFO)
 
-    sid = main(catalog, schema, warehouse_id)
-    print(f"GENIE_SPACE_ID={sid}")
+sid = main(catalog, schema, warehouse_id)
+print(f"GENIE_SPACE_ID={sid}")

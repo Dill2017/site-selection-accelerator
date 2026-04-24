@@ -1,22 +1,40 @@
-"""Pre-train a Hex2Vec model on multiple cities and save to a UC Volume.
+# Databricks notebook source
 
-Runs as a DABs job task after the gold tables are created.
-Follows the Hex2Vec paper methodology: fit on a diverse set of cities
-so the encoder learns general urban spatial patterns, then save the
-model for the app to load and transform at request time.
+# COMMAND ----------
 
-End users can also run this script directly:
-    python train_hex2vec.py <catalog> <schema> <warehouse_id>
-Or with env vars (loads from .env):
-    python train_hex2vec.py
-"""
+# MAGIC %md
+# MAGIC # Train Hex2Vec Model
+# MAGIC Pre-train a Hex2Vec model on multiple cities and save to a UC Volume.
+# MAGIC
+# MAGIC Follows the Hex2Vec paper methodology: fit on a diverse set of cities
+# MAGIC so the encoder learns general urban spatial patterns, then save the
+# MAGIC model for the app to load and transform at request time.
+
+# COMMAND ----------
+
+dbutils.widgets.text("catalog", "")
+dbutils.widgets.text("schema", "")
+dbutils.widgets.text("warehouse_id", "")
+
+catalog = dbutils.widgets.get("catalog")
+schema = dbutils.widgets.get("schema")
+warehouse_id = dbutils.widgets.get("warehouse_id")
+
+print(f"Catalog:      {catalog}")
+print(f"Schema:       {schema}")
+print(f"Warehouse ID: {warehouse_id}")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Configuration
+
+# COMMAND ----------
 
 from __future__ import annotations
 
 import json
 import logging
-import os
-import sys
 import tempfile
 import time
 from datetime import datetime, timezone
@@ -33,10 +51,6 @@ from srai.embedders import Hex2VecEmbedder
 from srai.neighbourhoods import H3Neighbourhood
 
 log = logging.getLogger(__name__)
-
-# ---------------------------------------------------------------------------
-# Training configuration
-# ---------------------------------------------------------------------------
 
 ENCODER_SIZES = [48, 24, 12]
 MAX_EPOCHS = 10
@@ -106,10 +120,12 @@ ALL_TRAINING_CATEGORIES: list[str] = POI_CATEGORIES + BUILDING_CATEGORIES
 
 METADATA_FILENAME = "hex2vec_metadata.json"
 
-# ---------------------------------------------------------------------------
-# SQL execution helper
-# ---------------------------------------------------------------------------
+# COMMAND ----------
 
+# MAGIC %md
+# MAGIC ## SQL Execution Helper
+
+# COMMAND ----------
 
 def _execute_sql(
     client: WorkspaceClient,
@@ -184,11 +200,12 @@ def _execute_sql(
     log.info("SQL returned %d rows (%d chunks)", len(df), total_chunks)
     return df
 
+# COMMAND ----------
 
-# ---------------------------------------------------------------------------
-# Data collection
-# ---------------------------------------------------------------------------
+# MAGIC %md
+# MAGIC ## Data Collection
 
+# COMMAND ----------
 
 def validate_cities(
     client: WorkspaceClient,
@@ -311,11 +328,12 @@ def fetch_buildings(
     bldg_df = _execute_sql(client, warehouse_id, query)
     return bldg_df[bldg_df["h3_cell"].isin(cell_set)].reset_index(drop=True)
 
+# COMMAND ----------
 
-# ---------------------------------------------------------------------------
-# SRAI GeoDataFrame builders (mirrors src/app/embeddings.py)
-# ---------------------------------------------------------------------------
+# MAGIC %md
+# MAGIC ## SRAI GeoDataFrame Builders
 
+# COMMAND ----------
 
 def _int_to_hex(cell_id: int) -> str:
     return h3.int_to_str(cell_id)
@@ -392,17 +410,17 @@ def build_joint_gdf(features_df: pd.DataFrame) -> pd.DataFrame:
     joint = joint.rename(columns={"h3_cell": "region_id"})
     return joint.set_index(["region_id", "feature_id"])
 
+# COMMAND ----------
 
-# ---------------------------------------------------------------------------
-# Main training pipeline
-# ---------------------------------------------------------------------------
+# MAGIC %md
+# MAGIC ## Training Pipeline
 
+# COMMAND ----------
 
 def main(catalog: str, schema: str, warehouse_id: str) -> str:
     """Train Hex2Vec on multiple cities and save to a UC Volume."""
     client = WorkspaceClient()
 
-    # -- Create volume if needed ---------------------------------------------
     volume_path = f"/Volumes/{catalog}/{schema}/models"
     model_path = f"{volume_path}/hex2vec"
 
@@ -411,7 +429,6 @@ def main(catalog: str, schema: str, warehouse_id: str) -> str:
         f"CREATE VOLUME IF NOT EXISTS {catalog}.{schema}.models",
     )
 
-    # -- Validate training cities --------------------------------------------
     log.info("Validating %d training cities…", len(TRAINING_CITIES))
     found, missing = validate_cities(
         client, warehouse_id, catalog, schema, TRAINING_CITIES,
@@ -426,14 +443,12 @@ def main(catalog: str, schema: str, warehouse_id: str) -> str:
         raise RuntimeError("No training cities found in gold_cities.")
     log.info("Training on %d cities", len(found))
 
-    # -- Tessellate all cities -----------------------------------------------
     log.info("Tessellating %d cities at resolution %d…", len(found), H3_RESOLUTION)
     h3_cells_df = tessellate_cities(
         client, warehouse_id, catalog, schema, found, H3_RESOLUTION,
     )
     log.info("Total H3 cells: %d", len(h3_cells_df))
 
-    # -- Fetch POIs ----------------------------------------------------------
     log.info("Fetching POIs for %d categories…", len(POI_CATEGORIES))
     pois_df = fetch_pois(
         client, warehouse_id, catalog, schema,
@@ -444,7 +459,6 @@ def main(catalog: str, schema: str, warehouse_id: str) -> str:
     poi_features = pois_df[["poi_id", "category", "lon", "lat", "h3_cell"]].copy()
     poi_features = poi_features.rename(columns={"poi_id": "feature_id"})
 
-    # -- Fetch buildings -----------------------------------------------------
     log.info("Fetching buildings…")
     bldg_df = fetch_buildings(
         client, warehouse_id, catalog, schema, h3_cells_df,
@@ -453,7 +467,6 @@ def main(catalog: str, schema: str, warehouse_id: str) -> str:
 
     bldg_features = _normalise_buildings(bldg_df)
 
-    # -- Merge into unified features -----------------------------------------
     if not bldg_features.empty:
         features_df = pd.concat(
             [poi_features, bldg_features], ignore_index=True,
@@ -463,7 +476,6 @@ def main(catalog: str, schema: str, warehouse_id: str) -> str:
 
     log.info("Total features: %d", len(features_df))
 
-    # -- Build SRAI GeoDataFrames --------------------------------------------
     log.info("Building GeoDataFrames…")
     regions_gdf = build_regions_gdf(h3_cells_df)
     features_gdf = build_features_gdf(features_df, ALL_TRAINING_CATEGORIES)
@@ -483,7 +495,6 @@ def main(catalog: str, schema: str, warehouse_id: str) -> str:
     if regions_gdf.empty or features_gdf.empty:
         raise RuntimeError("No feature data intersects any H3 cells.")
 
-    # -- Fit Hex2Vec ---------------------------------------------------------
     neighbourhood = H3Neighbourhood(regions_gdf)
     log.info(
         "Fitting Hex2Vec: encoder=%s, epochs=%d, batch_size=%d",
@@ -498,9 +509,6 @@ def main(catalog: str, schema: str, warehouse_id: str) -> str:
     )
     log.info("Hex2Vec fitting complete.")
 
-    # -- Save model and metadata ---------------------------------------------
-    # UC Volumes don't support standard filesystem writes via FUSE for nested
-    # paths; use the Databricks SDK Files API to upload reliably.
     with tempfile.TemporaryDirectory() as tmp:
         local_dir = Path(tmp) / "hex2vec"
         local_dir.mkdir()
@@ -533,27 +541,17 @@ def main(catalog: str, schema: str, warehouse_id: str) -> str:
     log.info("Model saved to %s", model_path)
     return model_path
 
+# COMMAND ----------
 
-if __name__ == "__main__":
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    )
+# MAGIC %md
+# MAGIC ## Execute
 
-    try:
-        from databricks.sdk.runtime import dbutils  # type: ignore[import]
-        catalog = dbutils.widgets.get("catalog")
-        schema = dbutils.widgets.get("schema")
-        warehouse_id = dbutils.widgets.get("warehouse_id")
-    except Exception:
-        if len(sys.argv) >= 4:
-            catalog, schema, warehouse_id = sys.argv[1], sys.argv[2], sys.argv[3]
-        else:
-            from dotenv import load_dotenv
-            load_dotenv()
-            catalog = os.getenv("GOLD_CATALOG", "")
-            schema = os.getenv("GOLD_SCHEMA", "")
-            warehouse_id = os.getenv("DATABRICKS_WAREHOUSE_ID", "")
+# COMMAND ----------
 
-    result = main(catalog, schema, warehouse_id)
-    print(f"HEX2VEC_MODEL_PATH={result}")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
+
+result = main(catalog, schema, warehouse_id)
+print(f"HEX2VEC_MODEL_PATH={result}")

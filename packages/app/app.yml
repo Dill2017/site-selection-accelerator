@@ -5,9 +5,11 @@ env:
     valueFrom: sql-warehouse
   - name: RADIANCE_JOB_ID
     valueFrom: radiance-job
+  - name: ETL_JOB_ID
+    valueFrom: etl-job
   # IMPORTANT: these must match the catalog and schema in databricks.yml
   - name: GOLD_CATALOG
-    value: "beatrice_liew"
+    value: "dilshad_shawki"
   - name: GOLD_SCHEMA
     value: "geospatial"
   - name: GENIE_SPACE_ID

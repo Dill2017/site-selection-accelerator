@@ -1,27 +1,59 @@
-"""Pre-compute VIIRS nighttime radiance per H3 cell for training cities.
+# Databricks notebook source
 
-Reads the VIIRS GeoTIFF from a UC Volume, clips to each training city's
-bounding box, assigns pixels to H3 cells via Databricks SQL, and writes
-the aggregated result as a gold_radiance Delta table.
+# COMMAND ----------
 
-If the VIIRS file is not present in the Volume the task exits
-successfully with a warning -- radiance is an optional enrichment.
+# MAGIC %md
+# MAGIC # Create Gold Radiance
+# MAGIC Pre-compute VIIRS nighttime radiance per H3 cell for training cities.
+# MAGIC
+# MAGIC Reads the VIIRS GeoTIFF from a UC Volume, clips to each training city's
+# MAGIC bounding box, assigns pixels to H3 cells via Databricks SQL, and writes
+# MAGIC the aggregated result as a gold_radiance Delta table.
+# MAGIC
+# MAGIC If the VIIRS file is not present in the Volume the task exits
+# MAGIC successfully with a warning — radiance is an optional enrichment.
 
-Usage (DABs job task):
-    spark_python_task with parameters: <catalog> <schema> <warehouse_id>
-Or locally:
-    python create_gold_radiance.py <catalog> <schema> <warehouse_id>
-"""
+# COMMAND ----------
+
+dbutils.widgets.text("catalog", "")
+dbutils.widgets.text("schema", "")
+dbutils.widgets.text("warehouse_id", "")
+dbutils.widgets.text("viirs_volume_name", "viirs_nighttime_lights")
+
+catalog = dbutils.widgets.get("catalog")
+schema = dbutils.widgets.get("schema")
+warehouse_id = dbutils.widgets.get("warehouse_id")
+viirs_volume_name = dbutils.widgets.get("viirs_volume_name")
+
+print(f"Catalog:           {catalog}")
+print(f"Schema:            {schema}")
+print(f"Warehouse ID:      {warehouse_id}")
+print(f"VIIRS Volume Name: {viirs_volume_name}")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Imports & Configuration
+
+# COMMAND ----------
 
 from __future__ import annotations
 
+import io
 import logging
-import os
-import sys
 import time
+from urllib.request import Request, urlopen
+
 import pandas as pd
+import pyarrow as pa
+import pyarrow.ipc
 from databricks.sdk import WorkspaceClient
-from databricks.sdk.service.sql import Disposition, Format, StatementState
+from databricks.sdk.service.sql import (
+    Disposition,
+    ExternalLink,
+    Format,
+    StatementState,
+)
 
 log = logging.getLogger(__name__)
 
@@ -67,6 +99,22 @@ TRAINING_CITIES: list[tuple[str, str]] = [
     ("BE", "Bruxelles - Brussel"),
 ]
 
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## SQL Execution Helper
+
+# COMMAND ----------
+
+def _download_arrow_chunk(link: ExternalLink) -> pa.Table:
+    req = Request(link.external_link)
+    if link.http_headers:
+        for key, value in link.http_headers.items():
+            req.add_header(key, value)
+    with urlopen(req) as resp:
+        buf = resp.read()
+    return pa.ipc.open_stream(io.BytesIO(buf)).read_all()
+
 
 def _execute_sql(
     client: WorkspaceClient,
@@ -78,9 +126,8 @@ def _execute_sql(
         statement=query,
         warehouse_id=warehouse_id,
         wait_timeout="50s",
-        disposition=Disposition.INLINE,
-        format=Format.JSON_ARRAY,
-        byte_limit=26214400,
+        disposition=Disposition.EXTERNAL_LINKS,
+        format=Format.ARROW_STREAM,
     )
 
     state = resp.status.state if resp.status else None
@@ -102,32 +149,32 @@ def _execute_sql(
     if resp.manifest is None or resp.result is None:
         return pd.DataFrame()
 
-    col_schemas = resp.manifest.schema.columns
-    columns = [col.name for col in col_schemas]
-    all_rows = list(resp.result.data_array or [])
+    tables: list[pa.Table] = []
+    if resp.result.external_links:
+        for link in resp.result.external_links:
+            tables.append(_download_arrow_chunk(link))
 
     total_chunks = resp.manifest.total_chunk_count or 1
     if total_chunks > 1:
         for chunk_idx in range(1, total_chunks):
-            chunk = client.statement_execution.get_statement_result_chunk_n(
+            chunk_resp = client.statement_execution.get_statement_result_chunk_n(
                 statement_id=resp.statement_id,
                 chunk_index=chunk_idx,
             )
-            if chunk.data_array:
-                all_rows.extend(chunk.data_array)
+            if chunk_resp.external_links:
+                for link in chunk_resp.external_links:
+                    tables.append(_download_arrow_chunk(link))
 
-    df = pd.DataFrame(all_rows, columns=columns)
-    for col_schema in col_schemas:
-        col_name = col_schema.name
-        type_text = (col_schema.type_text or "").upper()
-        if col_name not in df.columns or df[col_name].empty:
-            continue
-        if "BIGINT" in type_text or "LONG" in type_text:
-            df[col_name] = pd.to_numeric(df[col_name], errors="coerce").astype("Int64")
-        elif "DOUBLE" in type_text or "FLOAT" in type_text or "DECIMAL" in type_text:
-            df[col_name] = pd.to_numeric(df[col_name], errors="coerce")
-    return df
+    if not tables:
+        return pd.DataFrame()
+    return pa.concat_tables(tables).to_pandas()
 
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## City Processing & Raster Helpers
+
+# COMMAND ----------
 
 def _find_viirs_tif(client: WorkspaceClient, volume_path: str) -> str | None:
     """Find the first .tif file in the Volume using the SDK Files API."""
@@ -138,7 +185,6 @@ def _find_viirs_tif(client: WorkspaceClient, volume_path: str) -> str | None:
     except Exception as e:
         log.warning("Could not list Volume %s: %s", volume_path, e)
     return None
-
 
 
 def _get_city_rows(
@@ -239,6 +285,12 @@ def _compute_radiance_for_city(
     log.info("  Polygon filter: %d → %d cells", len(radiance_df), len(filtered))
     return filtered
 
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Main Pipeline
+
+# COMMAND ----------
 
 def main(
     catalog: str,
@@ -247,8 +299,7 @@ def main(
     viirs_volume_name: str = "viirs_nighttime_lights",
 ) -> str:
     """Compute gold_radiance for all training cities."""
-    profile = os.environ.get("DATABRICKS_CONFIG_PROFILE")
-    client = WorkspaceClient(profile=profile) if profile else WorkspaceClient()
+    client = WorkspaceClient()
 
     volume_path = f"/Volumes/{catalog}/{schema}/{viirs_volume_name}"
     viirs_volume_path = _find_viirs_tif(client, volume_path)
@@ -313,30 +364,17 @@ def main(
 
     return f"{catalog}.{schema}.gold_radiance"
 
+# COMMAND ----------
 
-if __name__ == "__main__":
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    )
+# MAGIC %md
+# MAGIC ## Execute
 
-    try:
-        from databricks.sdk.runtime import dbutils  # type: ignore[import]
-        catalog = dbutils.widgets.get("catalog")
-        schema = dbutils.widgets.get("schema")
-        warehouse_id = dbutils.widgets.get("warehouse_id")
-        viirs_volume_name = dbutils.widgets.get("viirs_volume_name")
-    except Exception:
-        if len(sys.argv) >= 4:
-            catalog, schema, warehouse_id = sys.argv[1], sys.argv[2], sys.argv[3]
-            viirs_volume_name = sys.argv[4] if len(sys.argv) >= 5 else "viirs_nighttime_lights"
-        else:
-            from dotenv import load_dotenv
-            load_dotenv()
-            catalog = os.getenv("GOLD_CATALOG", "")
-            schema = os.getenv("GOLD_SCHEMA", "")
-            warehouse_id = os.getenv("DATABRICKS_WAREHOUSE_ID", "")
-            viirs_volume_name = os.getenv("VIIRS_VOLUME_NAME", "viirs_nighttime_lights")
+# COMMAND ----------
 
-    result = main(catalog, schema, warehouse_id, viirs_volume_name)
-    print(f"GOLD_RADIANCE_RESULT={result}")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
+
+result = main(catalog, schema, warehouse_id, viirs_volume_name)
+print(f"GOLD_RADIANCE_RESULT={result}")

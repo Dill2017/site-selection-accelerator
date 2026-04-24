@@ -451,6 +451,7 @@ async def analyze(req: AnalyzeRequest) -> StreamingResponse:
                 yield _sse({"type": "progress", "step": "computing_radiance", "pct": 82})
                 max_wait_s = 300
                 poll_interval_s = 1
+                keepalive_interval_s = 15
                 elapsed = 0.0
                 try:
                     while elapsed < max_wait_s:
@@ -469,6 +470,9 @@ async def analyze(req: AnalyzeRequest) -> StreamingResponse:
                             break
                         _time.sleep(poll_interval_s)
                         elapsed += poll_interval_s
+                        if elapsed % keepalive_interval_s == 0:
+                            pct = min(82 + int(elapsed / max_wait_s * 8), 89)
+                            yield _sse({"type": "progress", "step": "computing_radiance", "pct": pct})
                     else:
                         log.warning("Radiance wait timed out after %ds", max_wait_s)
                 except Exception as e:
@@ -982,6 +986,22 @@ async def get_assets():
                 name="Genie Space (Brand Explorer)",
                 url=f"{host}/genie/rooms/{GENIE_SPACE_ID}" if host else "",
                 asset_type="genie",
+            ))
+
+        etl_job_id = os.getenv("ETL_JOB_ID", "")
+        if etl_job_id and host:
+            links.append(AssetLink(
+                name="Geospatial ETL Job",
+                url=f"{host}/jobs/{etl_job_id}",
+                asset_type="job",
+            ))
+
+        radiance_job_id = os.getenv("RADIANCE_JOB_ID", "")
+        if radiance_job_id and host:
+            links.append(AssetLink(
+                name="On-Demand Radiance Job",
+                url=f"{host}/jobs/{radiance_job_id}",
+                asset_type="job",
             ))
 
         links.append(AssetLink(

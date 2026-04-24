@@ -6,6 +6,7 @@ import { ScatterplotLayer, GeoJsonLayer } from "@deck.gl/layers";
 import type { PickingInfo, Layer } from "@deck.gl/core";
 import type { HexagonData, BrandLocationData, DrawingMode } from "@/lib/types";
 import { DrawToolbar } from "./draw-toolbar";
+import { MapLegend } from "./map-legend";
 import "maplibre-gl/dist/maplibre-gl.css";
 
 const CARTO_BASEMAP =
@@ -329,26 +330,11 @@ export function OpportunityMap({
       )}
 
       {hasResults && (
-        <div className="absolute bottom-4 left-4 z-10 flex flex-wrap gap-3 rounded-lg border bg-card/90 px-3 py-2 text-xs backdrop-blur">
-          <span className="flex items-center gap-1.5">
-            <span className="inline-block h-3 w-3 rounded-full bg-[rgb(30,50,255)]" />
-            Source locations
-          </span>
-          {existingTargetLocations.length > 0 && (
-            <span className="flex items-center gap-1.5">
-              <span className="inline-block h-3 w-3 rounded-full border-2 border-[rgb(30,50,200)] bg-[rgb(100,140,255)]" />
-              Existing in target
-            </span>
-          )}
-          <span className="flex items-center gap-1.5">
-            <span className="inline-block h-3 w-3 rounded-full border-2 border-white bg-[rgb(0,200,80)]" />
-            Top opportunities
-          </span>
-          <span className="flex items-center gap-1.5">
-            <span className="inline-block h-2.5 w-6 rounded-sm" style={{ background: "linear-gradient(to right, rgb(0,0,200), rgb(0,150,0), rgb(255,0,0))" }} />
-            Similarity
-          </span>
-        </div>
+        <MapLegend
+          hasCompetition={hasCompetition}
+          competitorBrand={competitorBrand}
+          hasExistingTarget={existingTargetLocations.length > 0}
+        />
       )}
     </div>
   );

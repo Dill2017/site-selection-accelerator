@@ -77,7 +77,7 @@ export function AssetsPopover() {
   }, [open, assets, fetchAssets]);
 
   const workspaceLinks = assets?.links.filter(
-    (l) => l.asset_type === "workspace" || l.asset_type === "genie" || l.asset_type === "volume"
+    (l) => l.asset_type === "workspace" || l.asset_type === "genie" || l.asset_type === "volume" || l.asset_type === "job"
   ) ?? [];
   const tableLinks = assets?.links.filter((l) => l.asset_type === "table") ?? [];
   const recentAnalyses = assets?.recent_analyses ?? [];

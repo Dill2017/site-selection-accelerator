@@ -4,77 +4,65 @@ resources:
       name: "[${bundle.target}] Site Selection - Refresh Geospatial Data"
       tasks:
         - task_key: "setup_schema"
-          sql_task:
-            warehouse_id: ${var.warehouse_id}
-            file:
-              path: ../src/pipeline/transformations/setup_schema.sql
-            parameters:
+          notebook_task:
+            notebook_path: ../src/pipeline/transformations/setup_schema.py
+            base_parameters:
               catalog: ${var.catalog}
               schema: ${var.schema}
         - task_key: "create_gold_cities"
           depends_on:
             - task_key: "setup_schema"
-          sql_task:
-            warehouse_id: ${var.warehouse_id}
-            file:
-              path: ../src/pipeline/transformations/gold_cities.sql
-            parameters:
+          notebook_task:
+            notebook_path: ../src/pipeline/transformations/gold_cities.py
+            base_parameters:
               catalog: ${var.catalog}
               schema: ${var.schema}
               carto_divisions_catalog: ${var.carto_divisions_catalog}
         - task_key: "create_gold_places"
           depends_on:
             - task_key: "setup_schema"
-          sql_task:
-            warehouse_id: ${var.warehouse_id}
-            file:
-              path: ../src/pipeline/transformations/gold_places.sql
-            parameters:
+          notebook_task:
+            notebook_path: ../src/pipeline/transformations/gold_places.py
+            base_parameters:
               catalog: ${var.catalog}
               schema: ${var.schema}
               carto_places_catalog: ${var.carto_places_catalog}
         - task_key: "create_gold_buildings"
           depends_on:
             - task_key: "setup_schema"
-          sql_task:
-            warehouse_id: ${var.warehouse_id}
-            file:
-              path: ../src/pipeline/transformations/gold_buildings.sql
-            parameters:
+          notebook_task:
+            notebook_path: ../src/pipeline/transformations/gold_buildings.py
+            base_parameters:
               catalog: ${var.catalog}
               schema: ${var.schema}
               carto_buildings_catalog: ${var.carto_buildings_catalog}
         - task_key: "create_gold_places_enriched"
           depends_on:
             - task_key: "setup_schema"
-          sql_task:
-            warehouse_id: ${var.warehouse_id}
-            file:
-              path: ../src/pipeline/transformations/gold_places_enriched.sql
-            parameters:
+          notebook_task:
+            notebook_path: ../src/pipeline/transformations/gold_places_enriched.py
+            base_parameters:
               catalog: ${var.catalog}
               schema: ${var.schema}
               carto_places_catalog: ${var.carto_places_catalog}
         - task_key: "create_analysis_tables"
           depends_on:
             - task_key: "setup_schema"
-          sql_task:
-            warehouse_id: ${var.warehouse_id}
-            file:
-              path: ../src/pipeline/transformations/analysis_tables.sql
-            parameters:
+          notebook_task:
+            notebook_path: ../src/pipeline/transformations/analysis_tables.py
+            base_parameters:
               catalog: ${var.catalog}
               schema: ${var.schema}
         - task_key: "create_gold_radiance"
           depends_on:
             - task_key: "create_gold_cities"
-          spark_python_task:
-            python_file: ../src/pipeline/transformations/create_gold_radiance.py
-            parameters:
-              - "${var.catalog}"
-              - "${var.schema}"
-              - "${var.warehouse_id}"
-              - "${var.viirs_volume_name}"
+          notebook_task:
+            notebook_path: ../src/pipeline/transformations/create_gold_radiance.py
+            base_parameters:
+              catalog: ${var.catalog}
+              schema: ${var.schema}
+              warehouse_id: ${var.warehouse_id}
+              viirs_volume_name: ${var.viirs_volume_name}
           libraries:
             - pypi:
                 package: "databricks-sdk>=0.65.0"
@@ -91,24 +79,25 @@ resources:
             - task_key: "create_gold_cities"
             - task_key: "create_gold_buildings"
             - task_key: "create_analysis_tables"
-          spark_python_task:
-            python_file: ../src/pipeline/setup_genie_space.py
-            parameters:
-              - "${var.catalog}"
-              - "${var.schema}"
-              - "${var.warehouse_id}"
+            - task_key: "create_gold_radiance"
+          notebook_task:
+            notebook_path: ../src/pipeline/setup_genie_space.py
+            base_parameters:
+              catalog: ${var.catalog}
+              schema: ${var.schema}
+              warehouse_id: ${var.warehouse_id}
           environment_key: "genie_setup"
         - task_key: "train_hex2vec"
           depends_on:
             - task_key: "create_gold_cities"
             - task_key: "create_gold_places"
             - task_key: "create_gold_buildings"
-          spark_python_task:
-            python_file: ../src/pipeline/train_hex2vec.py
-            parameters:
-              - "${var.catalog}"
-              - "${var.schema}"
-              - "${var.warehouse_id}"
+          notebook_task:
+            notebook_path: ../src/pipeline/train_hex2vec.py
+            base_parameters:
+              catalog: ${var.catalog}
+              schema: ${var.schema}
+              warehouse_id: ${var.warehouse_id}
           libraries:
             - pypi:
                 package: "databricks-sdk>=0.65.0"

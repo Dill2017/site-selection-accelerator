@@ -11,16 +11,16 @@ resources:
           default: "9"
       tasks:
         - task_key: "compute_radiance"
-          spark_python_task:
-            python_file: ../src/pipeline/transformations/compute_city_radiance.py
-            parameters:
-              - "${var.catalog}"
-              - "${var.schema}"
-              - "${var.warehouse_id}"
-              - "{{job.parameters.country}}"
-              - "{{job.parameters.city}}"
-              - "{{job.parameters.resolution}}"
-              - "${var.viirs_volume_name}"
+          notebook_task:
+            notebook_path: ../src/pipeline/transformations/compute_city_radiance.py
+            base_parameters:
+              catalog: ${var.catalog}
+              schema: ${var.schema}
+              warehouse_id: ${var.warehouse_id}
+              country: "{{job.parameters.country}}"
+              city: "{{job.parameters.city}}"
+              resolution: "{{job.parameters.resolution}}"
+              viirs_volume_name: ${var.viirs_volume_name}
           environment_key: "radiance_serverless"
       environments:
         - environment_key: "radiance_serverless"

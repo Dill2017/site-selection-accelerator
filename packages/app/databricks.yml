@@ -1,5 +1,5 @@
 bundle:
-  name: site-selection
+  name: site-selection-accelerator
 
 sync:
   include:
@@ -8,13 +8,6 @@ sync:
 artifacts:
   default:
     build: apx build
-
-resources:
-  apps:
-    site-selection-app:
-      name: "site-selection-accelerator"
-      description: "Brand Site Selection Accelerator"
-      source_code_path: ./.build
 
 targets:
   dev:
