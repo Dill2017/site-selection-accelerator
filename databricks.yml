@@ -14,7 +14,7 @@ variables:
       Unity Catalog catalog for all gold tables, analysis tables, and the
       Hex2Vec model volume.  Must already exist; the ETL job creates the
       schema inside it.
-    default: "dilshad_shawki"
+    default: "CHANGE_ME"
   schema:
     description: "Schema inside the catalog (created by the ETL job)."
     default: "geospatial"
@@ -23,7 +23,7 @@ variables:
       SQL Warehouse used by the ETL job and the running app.
       Looked up by display name — change to match your warehouse.
     lookup:
-      warehouse: "Shared Endpoint"
+      warehouse: "CHANGE_ME"
   node_type_id:
     description: >
       Single-node cluster instance type for the Hex2Vec training task.
