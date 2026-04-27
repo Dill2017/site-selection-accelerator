@@ -22,6 +22,20 @@ echo "║   Site Selection Accelerator — Configuration                ║"
 echo "╚══════════════════════════════════════════════════════════════╝"
 echo ""
 
+# ── Workspace ─────────────────────────────────────────────────────────────────
+echo "Enter the full URL of your Databricks workspace."
+echo "  e.g. https://my-workspace.cloud.databricks.com"
+echo "  e.g. https://adb-1234567890.11.azuredatabricks.net"
+echo ""
+read -rp "Workspace URL: " WORKSPACE_HOST
+if [[ -z "$WORKSPACE_HOST" ]]; then
+  echo "ERROR: workspace URL is required."
+  exit 1
+fi
+WORKSPACE_HOST="${WORKSPACE_HOST%/}"
+
+echo ""
+
 # ── Catalog ──────────────────────────────────────────────────────────────────
 read -rp "Unity Catalog catalog name (e.g. my_catalog): " CATALOG
 if [[ -z "$CATALOG" ]]; then
@@ -83,6 +97,7 @@ fi
 # ── Summary ──────────────────────────────────────────────────────────────────
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "  Workspace:            $WORKSPACE_HOST"
 echo "  Catalog:              $CATALOG"
 echo "  Schema:               $SCHEMA"
 echo "  Warehouse:            $WAREHOUSE"
@@ -112,11 +127,13 @@ echo "Updating $BUNDLE_FILE …"
 
 # Use Python for reliable YAML-aware replacement
 python3 - "$BUNDLE_FILE" "$CATALOG" "$SCHEMA" "$WAREHOUSE" "$NODE_TYPE" \
-        "$CARTO_BUILDINGS" "$CARTO_PLACES" "$CARTO_DIVISIONS" <<'PYEOF'
+        "$CARTO_BUILDINGS" "$CARTO_PLACES" "$CARTO_DIVISIONS" \
+        "$WORKSPACE_HOST" <<'PYEOF'
 import sys, re
 
 path, catalog, schema, warehouse, node_type, \
-    carto_buildings, carto_places, carto_divisions = sys.argv[1:9]
+    carto_buildings, carto_places, carto_divisions, \
+    workspace_host = sys.argv[1:10]
 
 with open(path) as f:
     content = f.read()
@@ -130,6 +147,10 @@ def replace_warehouse_lookup(text, new_name):
     pattern = r'(warehouse:\s*)"[^"]*"'
     return re.sub(pattern, rf'\1"{new_name}"', text, count=1)
 
+def replace_workspace_host(text, new_host):
+    pattern = r'(host:\s*)"[^"]*"'
+    return re.sub(pattern, rf'\1"{new_host}"', text)
+
 content = replace_default(content, "catalog", catalog)
 content = replace_default(content, "schema", schema)
 content = replace_default(content, "node_type_id", node_type)
@@ -137,6 +158,7 @@ content = replace_default(content, "carto_divisions_catalog", carto_divisions)
 content = replace_default(content, "carto_places_catalog", carto_places)
 content = replace_default(content, "carto_buildings_catalog", carto_buildings)
 content = replace_warehouse_lookup(content, warehouse)
+content = replace_workspace_host(content, workspace_host)
 
 with open(path, "w") as f:
     f.write(content)
@@ -177,7 +199,7 @@ echo ""
 echo "Done! Both config files are now in sync."
 echo ""
 echo "Next steps:"
-echo "  1. Authenticate:   databricks auth login --host https://<your-workspace>"
+echo "  1. Authenticate:   databricks auth login --host $WORKSPACE_HOST"
 echo "  2. Build:          uv run apx build"
 echo "  3. Deploy:         databricks bundle deploy"
 echo "  4. Run ETL:        databricks bundle run geospatial_etl_job"

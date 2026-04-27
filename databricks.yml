@@ -14,16 +14,16 @@ variables:
       Unity Catalog catalog for all gold tables, analysis tables, and the
       Hex2Vec model volume.  Must already exist; the ETL job creates the
       schema inside it.
-    default: "CHANGE_ME"
+    default: "users"
   schema:
     description: "Schema inside the catalog (created by the ETL job)."
-    default: "geospatial"
+    default: "dilshad_shawki"
   warehouse_id:
     description: >
       SQL Warehouse used by the ETL job and the running app.
       Looked up by display name — change to match your warehouse.
     lookup:
-      warehouse: "CHANGE_ME"
+      warehouse: "Shared Endpoint"
   node_type_id:
     description: >
       Single-node cluster instance type for the Hex2Vec training task.
@@ -56,5 +56,9 @@ targets:
   dev:
     default: true
     mode: development
+    workspace:
+      host: "https://CHANGE_ME.cloud.databricks.com"
   prod:
     mode: production
+    workspace:
+      host: "https://CHANGE_ME.cloud.databricks.com"

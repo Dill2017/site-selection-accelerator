@@ -134,16 +134,16 @@ Run the interactive setup script:
 bash setup.sh
 ```
 
-It asks for your catalog name, schema name, SQL warehouse display name, node
-type, and CARTO Marketplace catalog names, then writes both config files in
-sync.
+It asks for your workspace URL, catalog name, schema name, SQL warehouse
+display name, node type, and CARTO Marketplace catalog names, then writes
+all config files in sync — including the target workspace in `databricks.yml`.
 
 ### Manual
 
 If you prefer to edit manually, update **both** of these files — they **must**
 match:
 
-**`databricks.yml`** — Bundle variables:
+**`databricks.yml`** — Bundle variables and target workspace:
 
 ```yaml
 variables:
@@ -156,7 +156,19 @@ variables:
       warehouse: "My SQL Warehouse"   # Exact display name of your SQL warehouse
   node_type_id:
     default: "i3.xlarge"              # Cloud-specific (see table above)
+
+targets:
+  dev:
+    workspace:
+      host: "https://my-workspace.cloud.databricks.com"  # Your workspace URL
+  prod:
+    workspace:
+      host: "https://my-workspace.cloud.databricks.com"  # Same workspace URL
 ```
+
+> **Important:** The `workspace.host` in each target tells the Databricks CLI
+> where to deploy. Without it, the CLI falls back to your `~/.databrickscfg`
+> DEFAULT profile, which may point to a different workspace.
 
 **`packages/app/app.yml`** — App runtime environment:
 
@@ -552,6 +564,7 @@ The `geospatial_etl_job` runs these tasks in order:
 | Symptom | Cause | Fix |
 |---|---|---|
 | `apx build` fails with "connection refused" or PyPI timeout | PyPI access blocked | See [Build in Restricted Environments](#build-in-restricted-environments) |
+| `bundle deploy` goes to the wrong workspace | `workspace.host` not set in targets | Run `bash setup.sh` or set `workspace.host` under each target in `databricks.yml` |
 | `bundle deploy` fails with "warehouse not found" | Warehouse display name doesn't match | Run `databricks warehouses list` and use the **exact** display name in `databricks.yml` |
 | `bundle deploy` fails with "catalog CHANGE_ME" | Forgot to configure | Run `bash setup.sh` or edit `databricks.yml` manually |
 | `bundle deploy` fails with empty `node_type_id` | Variable not set for your cloud | Set the correct instance type (see [Prerequisites](#4-cloud-specific-node-type-for-hex2vec-training)) |
@@ -667,6 +680,7 @@ for w in json.load(sys.stdin):
 
 | File | Setting | Purpose |
 |---|---|---|
+| `databricks.yml` | `targets.*.workspace.host` | Databricks workspace URL for deployment |
 | `databricks.yml` | `variables.catalog` | Unity Catalog catalog for all tables |
 | `databricks.yml` | `variables.schema` | Schema for all tables (default: `geospatial`) |
 | `databricks.yml` | `variables.warehouse_id` | SQL warehouse (looked up by display name) |
