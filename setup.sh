@@ -34,6 +34,33 @@ if [[ -z "$WORKSPACE_HOST" ]]; then
 fi
 WORKSPACE_HOST="${WORKSPACE_HOST%/}"
 
+# ── Detect cloud provider from workspace URL ──────────────────────────────────
+if [[ "$WORKSPACE_HOST" == *".azuredatabricks.net"* ]]; then
+  DETECTED_CLOUD="Azure"
+  DEFAULT_NODE_TYPE="Standard_DS3_v2"
+elif [[ "$WORKSPACE_HOST" == *".gcp.databricks.com"* ]]; then
+  DETECTED_CLOUD="GCP"
+  DEFAULT_NODE_TYPE="n1-standard-4"
+else
+  DETECTED_CLOUD="AWS"
+  DEFAULT_NODE_TYPE="i3.xlarge"
+fi
+echo "  Detected cloud: $DETECTED_CLOUD"
+
+# ── Clean stale deployment state ──────────────────────────────────────────────
+if [[ -f ".databricks/bundle/dev/terraform/terraform.tfstate" ]]; then
+  echo ""
+  echo "  ⚠  Found existing Terraform state from a previous deployment."
+  echo "     This must be cleared when targeting a new workspace, otherwise"
+  echo "     the deploy will fail trying to look up old resource IDs."
+  echo ""
+  read -rp "  Remove stale state? (Recommended) [Y/n] " CLEAN_STATE
+  if [[ "$(printf '%s' "$CLEAN_STATE" | tr '[:upper:]' '[:lower:]')" != "n" ]]; then
+    rm -rf .databricks/bundle/
+    echo "  Removed .databricks/bundle/ — deploy will start fresh."
+  fi
+fi
+
 echo ""
 
 # ── Catalog ──────────────────────────────────────────────────────────────────
@@ -61,13 +88,15 @@ fi
 
 # ── Node type (cloud-specific) ───────────────────────────────────────────────
 echo ""
-echo "Pick the instance type for the Hex2Vec training cluster:"
+echo "Pick the instance type for the Hex2Vec training cluster."
 echo "  AWS:   i3.xlarge"
 echo "  Azure: Standard_DS3_v2"
 echo "  GCP:   n1-standard-4"
 echo ""
-read -rp "node_type_id [Standard_DS3_v2]: " NODE_TYPE
-NODE_TYPE="${NODE_TYPE:-Standard_DS3_v2}"
+echo "  (Auto-detected $DETECTED_CLOUD — default set to $DEFAULT_NODE_TYPE)"
+echo ""
+read -rp "node_type_id [$DEFAULT_NODE_TYPE]: " NODE_TYPE
+NODE_TYPE="${NODE_TYPE:-$DEFAULT_NODE_TYPE}"
 
 # ── CARTO Marketplace Data ────────────────────────────────────────────────────
 echo ""

@@ -565,6 +565,8 @@ The `geospatial_etl_job` runs these tasks in order:
 |---|---|---|
 | `apx build` fails with "connection refused" or PyPI timeout | PyPI access blocked | See [Build in Restricted Environments](#build-in-restricted-environments) |
 | `bundle deploy` goes to the wrong workspace | `workspace.host` not set in targets | Run `bash setup.sh` or set `workspace.host` under each target in `databricks.yml` |
+| `bundle deploy` fails with "does not have permissions on job" | Stale Terraform state from a previous workspace | Delete `.databricks/bundle/` and redeploy: `rm -rf .databricks/bundle/ && databricks bundle deploy`. Running `bash setup.sh` again will also detect and clean this automatically |
+| `bundle deploy` fails with "Node type X is not supported" | Node type doesn't match the cloud (e.g. Azure type on AWS) | Run `bash setup.sh` — it auto-detects the cloud from your workspace URL and sets the right default. Or edit `node_type_id` in `databricks.yml` manually (AWS: `i3.xlarge`, Azure: `Standard_DS3_v2`, GCP: `n1-standard-4`) |
 | `bundle deploy` fails with "warehouse not found" | Warehouse display name doesn't match | Run `databricks warehouses list` and use the **exact** display name in `databricks.yml` |
 | `bundle deploy` fails with "catalog CHANGE_ME" | Forgot to configure | Run `bash setup.sh` or edit `databricks.yml` manually |
 | `bundle deploy` fails with empty `node_type_id` | Variable not set for your cloud | Set the correct instance type (see [Prerequisites](#4-cloud-specific-node-type-for-hex2vec-training)) |
