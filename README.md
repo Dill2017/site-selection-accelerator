@@ -78,8 +78,9 @@ The ETL pipeline reads geospatial data from three free CARTO datasets. You
 | 3 | CARTO Overture Maps — Buildings | `carto_overture_maps_buildings` | [Open listing](https://marketplace.databricks.com/detail/14de3db9-b9d2-4f74-8b20-c440b0e2bd40/CARTO_Overture-Maps-Buildings) |
 
 > **If your workspace uses different catalog names** for these datasets (e.g.
-> your admin renamed them), override the `carto_*_catalog` variables in
-> `databricks.yml` after running `setup.sh`.
+> your admin renamed them), `setup.sh` will prompt you for the correct names.
+> You can also override the `carto_*_catalog` variables in `databricks.yml`
+> manually.
 
 **Verify installation** — run this in a Databricks SQL editor or notebook:
 
@@ -133,8 +134,9 @@ Run the interactive setup script:
 bash setup.sh
 ```
 
-It asks for your catalog name, schema name, SQL warehouse display name, and
-node type, then writes both config files in sync.
+It asks for your catalog name, schema name, SQL warehouse display name, node
+type, and CARTO Marketplace catalog names, then writes both config files in
+sync.
 
 ### Manual
 
@@ -172,7 +174,8 @@ env:
 
 ### Optional: CARTO Catalog Overrides
 
-If your CARTO Marketplace catalogs have non-default names:
+The `setup.sh` script handles this interactively, but if you need to override
+manually after setup:
 
 ```yaml
 # In databricks.yml under variables:
