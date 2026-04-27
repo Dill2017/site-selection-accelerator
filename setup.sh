@@ -55,17 +55,45 @@ echo ""
 read -rp "node_type_id [Standard_DS3_v2]: " NODE_TYPE
 NODE_TYPE="${NODE_TYPE:-Standard_DS3_v2}"
 
+# ── CARTO Marketplace Data ────────────────────────────────────────────────────
+echo ""
+echo "This accelerator requires three datasets from the Databricks Marketplace:"
+echo "  • CARTO Overture Maps - Buildings"
+echo "  • CARTO Overture Maps - Places"
+echo "  • CARTO Overture Maps - Divisions"
+echo ""
+echo "Install them before running the ETL job."
+echo "See: https://marketplace.databricks.com (search \"CARTO Overture\")"
+echo ""
+read -rp "Did you install all three into your main catalog ($CATALOG)? [Y/n] " CARTO_SAME
+if [[ "$(printf '%s' "$CARTO_SAME" | tr '[:upper:]' '[:lower:]')" == "n" ]]; then
+  echo ""
+  read -rp "CARTO Buildings catalog  [carto_overture_maps_buildings]: " CARTO_BUILDINGS
+  CARTO_BUILDINGS="${CARTO_BUILDINGS:-carto_overture_maps_buildings}"
+  read -rp "CARTO Places catalog     [carto_overture_maps_places]: " CARTO_PLACES
+  CARTO_PLACES="${CARTO_PLACES:-carto_overture_maps_places}"
+  read -rp "CARTO Divisions catalog  [carto_overture_maps_divisions]: " CARTO_DIVISIONS
+  CARTO_DIVISIONS="${CARTO_DIVISIONS:-carto_overture_maps_divisions}"
+else
+  CARTO_BUILDINGS="$CATALOG"
+  CARTO_PLACES="$CATALOG"
+  CARTO_DIVISIONS="$CATALOG"
+fi
+
 # ── Summary ──────────────────────────────────────────────────────────────────
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "  Catalog:       $CATALOG"
-echo "  Schema:        $SCHEMA"
-echo "  Warehouse:     $WAREHOUSE"
-echo "  Node type:     $NODE_TYPE"
+echo "  Catalog:              $CATALOG"
+echo "  Schema:               $SCHEMA"
+echo "  Warehouse:            $WAREHOUSE"
+echo "  Node type:            $NODE_TYPE"
+echo "  CARTO Buildings:      $CARTO_BUILDINGS"
+echo "  CARTO Places:         $CARTO_PLACES"
+echo "  CARTO Divisions:      $CARTO_DIVISIONS"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 read -rp "Apply these settings? [Y/n] " CONFIRM
-if [[ "${CONFIRM,,}" == "n" ]]; then
+if [[ "$(printf '%s' "$CONFIRM" | tr '[:upper:]' '[:lower:]')" == "n" ]]; then
   echo "Aborted."
   exit 0
 fi
@@ -83,10 +111,12 @@ _sed_i() {
 echo "Updating $BUNDLE_FILE …"
 
 # Use Python for reliable YAML-aware replacement
-python3 - "$BUNDLE_FILE" "$CATALOG" "$SCHEMA" "$WAREHOUSE" "$NODE_TYPE" <<'PYEOF'
+python3 - "$BUNDLE_FILE" "$CATALOG" "$SCHEMA" "$WAREHOUSE" "$NODE_TYPE" \
+        "$CARTO_BUILDINGS" "$CARTO_PLACES" "$CARTO_DIVISIONS" <<'PYEOF'
 import sys, re
 
-path, catalog, schema, warehouse, node_type = sys.argv[1:6]
+path, catalog, schema, warehouse, node_type, \
+    carto_buildings, carto_places, carto_divisions = sys.argv[1:9]
 
 with open(path) as f:
     content = f.read()
@@ -103,6 +133,9 @@ def replace_warehouse_lookup(text, new_name):
 content = replace_default(content, "catalog", catalog)
 content = replace_default(content, "schema", schema)
 content = replace_default(content, "node_type_id", node_type)
+content = replace_default(content, "carto_divisions_catalog", carto_divisions)
+content = replace_default(content, "carto_places_catalog", carto_places)
+content = replace_default(content, "carto_buildings_catalog", carto_buildings)
 content = replace_warehouse_lookup(content, warehouse)
 
 with open(path, "w") as f:
